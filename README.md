@@ -10,6 +10,14 @@ The implementation of this algorithm consists of the following three files:
 *  bessel_data.f90
 *  bessel_test.f90
 
+Data used by the bessel_test.f90 to perform testing of the code is contained in the text
+files:
+
+*  bessel1.txt
+*  bessel2.txt
+*  bessel3.txt
+*  bessel4.txt
+
 The main documentation is in the file bessel_eval.f90, which contains the only user-callable subroutine, bessel_eval.  The test code for this subroutine can be compiled and executed with the following
 command:
 

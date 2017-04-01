@@ -1,4 +1,4 @@
-Fast Evalaution of Bessel Functions
+Fast Evaluation of Bessel Functions
 =====================================
 
 

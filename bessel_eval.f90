@@ -44,11 +44,11 @@
 !  These precomputed expansions are supplemented with other approaches in a few cases:
 !
 !  - In order to evaluate J_\nu(t) and Y_\nu(t) when \nu >= 2 and the argument is large 
-!    (t > 10,000 \nu ), an asymptotic expansion of the phase function 
+!    (t > 1,000 \nu ), an asymptotic expansion of the phase function 
 !    \alpha(t) is used;
 !
 !  - In order to evaluate J_\nu(t) and Y_\nu(t) for \nu >= 2 and small t 
-!      (t < \nu / 10,000), Debye's asymptotic expansions are used.
+!      (t < \nu / 1,000), Debye's asymptotic expansions are used.
 !
 !  - When \nu <= 2 and t <= 2, series expansions of J_\nu and Y_\nu are used.
 !

@@ -17,7 +17,7 @@
 !
 !  This file contains code for evaluating the Bessel functions of the first and second
 !  kinds of real orders and arguments.  For the most part, it uses the precomputed
-!  expansions found in the file bessel_data.f90 to do so.
+!  expansions found in the files bessel_data.bin and bessel_data16.bin to do so.
 !
 !  More specifically, bessel_data.f90 stores representations of three different
 !  functions:
@@ -43,20 +43,26 @@
 ! 
 !  These precomputed expansions are supplemented with other approaches in a few cases:
 !
-!  - In order to evaluate J_\nu(t) and Y_\nu(t) when \nu >= 5 and the argument is large 
-!    (t > 1,000,000 \nu ), an asymptotic expansion of the phase function 
+!  - In order to evaluate J_\nu(t) and Y_\nu(t) when \nu >= 2 and the argument is large 
+!    (t > 10,000 \nu ), an asymptotic expansion of the phase function 
 !    \alpha(t) is used;
 !
-!  - In order to evaluate J_\nu(t) and Y_\nu(t) for \nu >= 5 and very small t 
-!      (t < \nu / 1,000,000), Debye's asymptotic expansions are used.
+!  - In order to evaluate J_\nu(t) and Y_\nu(t) for \nu >= 2 and small t 
+!      (t < \nu / 10,000), Debye's asymptotic expansions are used.
 !
-!  - When \nu <= 5 and t <= 1, series expansions of J_\nu and Y_\nu are used.
-!
+!  - When \nu <= 2 and t <= 2, series expansions of J_\nu and Y_\nu are used.
 !
 !  The following subroutines should be regarded as user-callable:
 !
+!    bessel_eval_init - read the tables of precomputed expansion coefficients from
+!      a binary file on the disk.  There are two such tables: one computed to
+!      double precision accuracy and the other to slightly higher (around 20 digit)
+!      accuracy.  The higher accuracy table is loaded when "double precision"
+!      has been redefined as real*16 (for instance, via the -fdefault-real-8
+!      gfortran compiler flag).
+!
 !    bessel_eval - evaluate the Bessel functions at a specified point (\nu,t)
-!      with \nu >= 0 and t > 0.  
+!      with \nu >= 0 and t > 0. 
 !
 !      In the event that (\nu,t) is in the oscillatory region (when t >= \sqrt(\nu^2-1/4)), 
 !      the values of \alpha(\nu,t) and its derivative with respect to t are also returned.  
@@ -64,11 +70,49 @@
 !      In the case that (\nu,t) is in the nonoscillatory region (when t < \sqrt(\nu^2-1/4)),
 !      the values of \log( J_\nu(t)) and \log( - Y_\nu(t)) are also returned.
 !
+!      WARNING: you must call bessel_eval_init before calling this routine.
+!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+module besseleval
+
+implicit double precision (a-h,o-z)
+
+type      bessel_expansion_data
+integer                          :: ifbetas,ifover,ifsmall
+double precision                 :: dnu1,dnu2,epsrequired
+integer                          :: k,nintsab,nintscd,nintsef
+double precision, allocatable    :: ab(:,:),cd(:,:),ef(:,:)
+
+
+
+integer                          :: ncoefsalpha,ncoefsalphap
+double precision, allocatable    :: coefsalpha(:),coefsalphap(:)
+
+integer, allocatable             :: iptrsalpha(:,:),iptrsalphap(:,:)
+integer                          :: ncoefsbeta1,ncoefsbeta2
+double precision, allocatable    :: coefsbeta1(:),coefsbeta2(:)
+integer, allocatable             :: iptrsbeta1(:,:),iptrsbeta2(:,:)
+double precision                 :: dmemory,time
+end type  bessel_expansion_data
+
+
+type (bessel_expansion_data)     :: expdata1, expdata2
+
+! Define a few constants which might be of use
+
+double precision, private        :: pi,piover2,piover4,sqrt2overpi
+
+data pi          / 3.141592653589793238462643383279502884197d0 /
+data sqrt2overpi / 0.797884560802865355879892119868763736952d0 /
+data piover2     / 1.570796326794896619231321691639751442099d0 /
+data piover4     / 0.785398163397448309615660845819875721049d0 /
+
+contains
+
 
 
 subroutine bessel_eval(dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
-use bessel_data
 implicit double precision (a-h,o-z)
 double precision, intent(in)      :: dnu,t
 double precision, intent(out)     :: alpha,alphader,vallogj,vallogy,valj,valy
@@ -101,22 +145,23 @@ double precision, intent(out)     :: alpha,alphader,vallogj,vallogy,valj,valy
 !    vallogy - the value of \log(-Y_\nu(t) ) when in the nonoscillatory region
 !
 
-! Define a few constants which might be of use
-
-data pi          / 3.141592653589793238462643383279502884197d0 /
-data eulergamma  / 0.577215664901532860606512090082402431042d0 /
-data sqrt2overpi / 0.797884560802865355879892119868763736952d0 /
-data piover2     / 1.570796326794896619231321691639751442099d0 /
-data twopi       / 6.283185307179586476925286766559005768394d0 /
-data sqrtpiover2 / 1.253314137315500251207882642405522626503d0 /
-data piover4     / 0.785398163397448309615660845819875721049d0 /
-
 alpha    = 0
 alphader = 0
 vallogj  = 0
 vallogy  = 0
 valj     = 0
 valy     = 0
+
+!
+!  Check to see if bessel_init has been called
+!
+
+if (.NOT. allocated(expdata1%ab)) then
+print *,"bessel_eval: bessel_eval_init must be called before bessel_eval"
+stop
+endif
+
+
 
 !
 !  Perform range checking
@@ -129,279 +174,178 @@ print *,"t   = ",t
 stop
 endif
 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !
-!  First handle the case of dnu <= 2
+!  Handle the case of small dnu
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+if (dnu .lt. 2d0) then
+
+!
+!  Use an asymptotic expansion for the phase function when t is large
 !
 
-if (dnu .le. 2d0) then
-
-!
-!  Use the asymptotic expansion for the phase function when t is large
-!
-
-if(t .gt. 1000000) then
+if(t .gt. 10000) then
 call bessel_phase_asymp(dnu,t,alpha,alphader)
 dd    = sqrt2overpi*1/sqrt(alphader*t)
-alpha = alpha - piover4 - piover2*dnu
 valj  = cos(alpha)*dd
 valy  = sin(alpha)*dd
 return
 endif
 
 !
-!  Use the series expansion when t <= 1
+!  Use  series expansions when t is small and the precomputed table otherwise.
 !
 
-if (t .le. 1) then
-call bessel_taylorj(dnu,t,valj)
-call bessel_taylory(dnu,t,valy)
-alphader = 2/(pi*t) * 1/(valj**2 + valy**2)
-alpha    = atan2(valy,valj)
+if (t .lt. 2) then
+call bessel_taylor(dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
+return
 else
-call  bessel_exp_eval2(dnu,t,k4,nintsab4,nintscd4,ab4,cd4,                        &
-  ncoefsalpha4,ncoefsalphap4,coefsalpha4,coefsalphap4,iptrsalpha4,iptrsalphap4,   &
-  alpha,alphader,vallogj,vallogy,valj,valy)
-endif
-
+call bessel_expeval(expdata2,dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
 if (dnu .gt. 0.5d0 .AND. t .lt. sqrt(dnu**2-0.25d0)) then
 vallogj  = log(valj)
 vallogy  = log(-valy)
 alphader = 0
 alpha    = 0
 endif
+endif
 
 return
 endif
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !
-!  When dnu >= 2 and t >= 1,000,000 * dnu, use an asymptotic expansion for the
-!  phase function.
+!  Handle dnu which are not small
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!
+!  When  t is large, use the asymptotic expansion
 !
 
 if (t .gt. 1000*dnu) then
 call bessel_phase_asymp(dnu,t,alpha,alphader)
 dd    = sqrt2overpi*1/sqrt(alphader*t)
-alpha = alpha-piover4 - piover2*dnu
 valj  = cos(alpha)*dd
 valy  = sin(alpha)*dd
 return
 endif
 
 !
-!  When dnu >=5 and t<= dnu/1,000,000, use Debye's asymptotic expansion;
-!  when 2 <= dnu < 5 and t < dnu/1,000,000 use series expansions
+!  When t is small, use Debye's expansion EXCEPT when dnu is small; in that case,
+!  use series expansions.
 !
 
-if (t .lt. dnu / 1000000.0d0) then
-
-if (dnu .le. 5) then
-call bessel_taylorj(dnu,t,valj)
-call bessel_taylory(dnu,t,valy)
-vallogj  = log(valj)
-vallogy  = log(-valy)
-else
+if (t .lt. dnu / 1000.0d0) then
+if (dnu .ge. 10) then
 call bessel_debye(dnu,t,vallogj,vallogy,valj,valy)
+else
+call bessel_taylor(dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
 endif
-
 return
-
 endif
 
 !
-!  Use the precomputed expansions otherwise.
+!  Use the precomputed table otherwise.
 !
 
-if (dnu .ge. 1000000) then
-call bessel_exp_eval(dnu,t,k1,nintsab1,nintscd1,nintsef1,ab1,cd1,ef1,             &
-  ncoefsalpha1,ncoefsalphap1,coefsalpha1,coefsalphap1,iptrsalpha1,iptrsalphap1,   &
-  ncoefsbeta11,ncoefsbeta21,coefsbeta11,coefsbeta21,iptrsbeta11,iptrsbeta21,      &
-  alpha,alphader,vallogj,vallogy,valj,valy)
+call bessel_expeval(expdata1,dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
 return
-endif
-
-if (dnu .ge. 1000) then
-call bessel_exp_eval(dnu,t,k2,nintsab2,nintscd2,nintsef2,ab2,cd2,ef2,             &
-  ncoefsalpha2,ncoefsalphap2,coefsalpha2,coefsalphap2,iptrsalpha2,iptrsalphap2,   &
-  ncoefsbeta12,ncoefsbeta22,coefsbeta12,coefsbeta22,iptrsbeta12,iptrsbeta22,      &
-  alpha,alphader,vallogj,vallogy,valj,valy)
-return
-endif
-
-call bessel_exp_eval(dnu,t,k3,nintsab3,nintscd3,nintsef3,ab3,cd3,ef3,             &
-  ncoefsalpha3,ncoefsalphap3,coefsalpha3,coefsalphap3,iptrsalpha3,iptrsalphap3,   &
-  ncoefsbeta13,ncoefsbeta23,coefsbeta13,coefsbeta23,iptrsbeta13,iptrsbeta23,      &
-  alpha,alphader,vallogj,vallogy,valj,valy)
 
 end subroutine
 
 
-subroutine bessel_exp_eval(dnu,t,k,nintsab,nintscd,nintsef,ab,cd,ef,        &
-  ncoefsalpha,ncoefsalphap,coefsalpha,coefsalphap,iptrsalpha,iptrsalphap,   &
-  ncoefsbeta1,ncoefsbeta2,coefsbeta1,coefsbeta2,iptrsbeta1,iptrsbeta2,     &
-  alpha,alphader,beta1,beta2,valj,valy)
+subroutine bessel_expeval(expdata,dnu,t,aval,apval,bval1,bval2,valj,valy)
 implicit double precision (a-h,o-z)
 
-double precision                     :: dnu,t
-integer                              :: nintsab,nintscd,nintsef
-double precision                     :: ab(2,nintsab),cd(2,nintscd),ef(2,nintsef)
+double precision, intent(in)       :: dnu,t
+type(bessel_expansion_data)        :: expdata
+double precision, intent(out)      :: aval,apval,bval1,bval2,valj,valy
 
-integer                              :: ncoefsalpha,ncoefsalphap
-double precision                     :: coefsalpha(ncoefsalpha)
-double precision                     :: coefsalphap(ncoefsalphap)
-integer                              :: iptrsalpha(nintsab,nintscd)
-integer                              :: iptrsalphap(nintsab,nintscd)
+ifsmall = expdata%ifsmall
 
-integer                              :: ncoefsbeta2,ncoefsbeta1
-double precision                     :: coefsbeta1(ncoefsbeta1)
-double precision                     :: coefsbeta2(ncoefsbeta2)
-integer                              :: iptrsbeta1(nintsef,nintscd)
-integer                              :: iptrsbeta2(nintsef,nintscd)
+if (expdata%ifover .eq. 1) then
+dnu0    = 1/dnu
+else
+dnu0    = dnu
+endif
 
+call bessel_evalabc(expdata%ifsmall,dnu,a,b,c)
 
-!
-!  Evaluate one of the precomputed expansions at a specified point (\nu,t).
-!
-!  If the specified point is in the oscillatory region, this routine returns 
-!  the value of \alpha and its derivative at (\nu,t) as well as the values of
-!  J_\nu(t) and Y_\nu(t). 
-!
-!  If the specified point is in the nonoscillatory region, this routine returns
-!  the value of \log (J_\nu(t)) and \log ( - Y_\nu(t)) as well as the values
-!  of J_\nu(t) and Y_\nu(t).
-!
-!
-
-data pi          / 3.141592653589793238462643383279502884197d0 /
-data eulergamma  / 0.577215664901532860606512090082402431042d0 /
-data sqrt2overpi / 0.797884560802865355879892119868763736952d0 /
-data piover2     / 1.570796326794896619231321691639751442099d0 /
-data twopi       / 6.283185307179586476925286766559005768394d0 /
-data sqrtpiover2 / 1.253314137315500251207882642405522626503d0 /
-data piover4     / 0.785398163397448309615660845819875721049d0 /
-
-
-dnu0 = 1/dnu
-a    = sqrt(dnu**2-0.25d0)
-b    = dnu*1000000.0d0
-c    = dnu/1000000.0d0
-
-!
-!  Oscillatory regime
-!
 
 if (t .ge. a) then
 
 u = (t-a)/(b-a)
-call bessel_findint(nintscd,cd,dnu0,intcd,c0,d0)
-call bessel_findint(nintsab,ab,u,intab,a0,b0)
 
-iptr1  = iptrsalpha(intab,intcd)
-iptr2  = iptrsalphap(intab,intcd)
+call bessel_findint(expdata%nintscd,expdata%cd,dnu0,intcd,c0,d0)
+call bessel_findint(expdata%nintsab,expdata%ab,u,intab,a0,b0)
 
-call bessel_tensor_eval(ncoefsalpha,coefsalpha,ncoefsalphap,coefsalphap,iptr1,iptr2,  &
-  a0,b0,c0,d0,u,dnu0,alpha,alphader)
+iptr1  = expdata%iptrsalpha(intab,intcd)
+iptr2  = expdata%iptrsalphap(intab,intcd)
+
+call bessel_tensor_eval(expdata%ncoefsalpha,expdata%coefsalpha,expdata%ncoefsalphap, &
+  expdata%coefsalphap,iptr1,iptr2,a0,b0,c0,d0,u,dnu0,aval,apval)
 
 
-alpha    = (alpha - piover2)*dnu
-alphader = alphader*dnu
-
-dd   = 1/sqrt(alphader*t)
-valj = sqrt2overpi * cos(alpha) * dd
-valy = sqrt2overpi * sin(alpha) * dd
-
-return
+if (expdata%ifover .eq. 1) then
+aval  = aval*dnu
+apval = apval * dnu
 endif
 
-!
-!  Nonoscillatory regime
-!
 
-u = (t-c)/(a-c)
+aval  = aval - piover2*dnu 
+dd    = 1.0d0/sqrt(apval*t)
+valj  = sqrt2overpi * cos(aval) * dd
+valy  = sqrt2overpi * sin(aval) * dd
 
-call bessel_findint(nintscd,cd,dnu0,intcd,c0,d0)
-call bessel_findint(nintsef,ef,u,intef,e0,f0)
+else
 
-iptr1  = iptrsbeta1(intef,intcd)
-iptr2  = iptrsbeta2(intef,intcd)
+u       = (t-c)/(a-c)
 
-call bessel_tensor_eval(ncoefsbeta1,coefsbeta1,ncoefsbeta1,coefsbeta2,iptr1,iptr2,  &
-  e0,f0,c0,d0,u,dnu0,beta1,beta2)
+call bessel_findint(expdata%nintsef,expdata%ef,u,intef,e0,f0)
+call bessel_findint(expdata%nintscd,expdata%cd,dnu0,intcd,c0,d0)
 
-beta1 = beta1*dnu 
-beta2 = beta2*dnu
+iptr1 = expdata%iptrsbeta1(intef,intcd)
+iptr2 = expdata%iptrsbeta2(intef,intcd)
+
+call bessel_tensor_eval(expdata%ncoefsbeta1,expdata%coefsbeta1,expdata%ncoefsbeta2,expdata%coefsbeta2, &
+  iptr1,iptr2,e0,f0,c0,d0,u,dnu0,bval1,bval2)
+
+if (expdata%ifover .eq. 1) then
+bval1 =  (bval1+1)*dnu
+bval2 =  (bval2-1)*dnu
+endif
 
 
-valj = exp(beta1)
-valy = -exp(beta2)
+bval1 = bval1 - 0.5d0*log(t)
+bval2 = bval2 - 0.5d0*log(t)
+
+
+valj = exp(bval1)
+valy = -exp(bval2)
+
+endif
 
 end subroutine
 
 
 
-subroutine bessel_exp_eval2(dnu,t,k,nintsab,nintscd,ab,cd,                  &
-  ncoefsalpha,ncoefsalphap,coefsalpha,coefsalphap,iptrsalpha,iptrsalphap,   &
-  alpha,alphader,beta1,beta2,valj,valy)
+subroutine bessel_evalabc(ifsmall,dnu,a,b,c)
 implicit double precision (a-h,o-z)
 
-double precision                     :: dnu,t
-integer                              :: nintsab,nintscd
-double precision                     :: ab(2,nintsab),cd(2,nintscd)
+if (ifsmall .eq. 1) then
+a = 2.0d0
+b = 10000.0d0
+else 
+a    = sqrt(dnu**2-0.25d0)
+b    = dnu * 1000.0d0
+c    = dnu / 1000.0d0
+endif
 
-integer                              :: ncoefsalpha,ncoefsalphap
-double precision                     :: coefsalpha(ncoefsalpha)
-double precision                     :: coefsalphap(ncoefsalphap)
-integer                              :: iptrsalpha(nintsab,nintscd)
-integer                              :: iptrsalphap(nintsab,nintscd)
-
-
-
-!
-!  Evaluate one of the precomputed expansions at a specified point (\nu,t).
-!
-!  If the specified point is in the oscillatory region, this routine returns 
-!  the value of \alpha and its derivative at (\nu,t) as well as the values of
-!  J_\nu(t) and Y_\nu(t). 
-!
-!  If the specified point is in the nonoscillatory region, this routine returns
-!  the value of \log (J_\nu(t)) and \log ( - Y_\nu(t)) as well as the values
-!  of J_\nu(t) and Y_\nu(t).
-!
-!
-
-data pi          / 3.141592653589793238462643383279502884197d0 /
-data eulergamma  / 0.577215664901532860606512090082402431042d0 /
-data sqrt2overpi / 0.797884560802865355879892119868763736952d0 /
-data piover2     / 1.570796326794896619231321691639751442099d0 /
-data twopi       / 6.283185307179586476925286766559005768394d0 /
-data sqrtpiover2 / 1.253314137315500251207882642405522626503d0 /
-data piover4     / 0.785398163397448309615660845819875721049d0 /
-
-
-dnu0 = dnu
-a    = 1.0d0
-b    = 1000000.0d0
-
-u = (t-a)/(b-a)
-
-call bessel_findint(nintscd,cd,dnu0,intcd,c0,d0)
-call bessel_findint(nintsab,ab,u,intab,a0,b0)
-
-iptr1  = iptrsalpha(intab,intcd)
-iptr2  = iptrsalphap(intab,intcd)
-
-call bessel_tensor_eval(ncoefsalpha,coefsalpha,ncoefsalphap,coefsalphap,iptr1,iptr2,  &
-  a0,b0,c0,d0,u,dnu0,alpha,alphader)
-
-alpha    = alpha - piover2*dnu
-dd       = 1/sqrt(alphader*t)
-valj     = sqrt2overpi * cos(alpha) * dd
-valy     = sqrt2overpi * sin(alpha) * dd
-
-end subroutine
-
-
-
-
+return
+end  subroutine
 
 
 subroutine bessel_phase_asymp(dnu,x,aval,apval)
@@ -423,16 +367,81 @@ implicit double precision (a-h,o-z)
 !    apval - the value of \alpha'_\nu(z)
 !
 
-aval = ((375733-0.172174q7*dnu**2+0.899808q6*dnu**4-0.9856q5*dnu**6+  &
-0.128q4*dnu**8)/(0.7q1*x**7)+(32*(-1073+0.4748q4*dnu**2-0.184q4*dnu**4  &
-+0.64q2*dnu**6))/(0.5q1*x**5)+(256*(25-0.104q3*dnu**2+  &
-0.16q2*dnu**4))/(0.3q1*x**3)+(0.4096q4*(-1+4*dnu**2))/x+  &
-0.32768q5*x)/0.32768q5
+aval = ((375733d0-0.172174d7*dnu**2+0.899808d6*dnu**4-0.9856d5*dnu**6+  &
+0.128d4*dnu**8)/(0.7d1*x**7)+(32*(-1073+0.4748d4*dnu**2-0.184d4*dnu**4  &
++0.64d2*dnu**6))/(0.5d1*x**5)+(256*(25-0.104d3*dnu**2+  &
+0.16d2*dnu**4))/(0.3d1*x**3)+(0.4096d4*(-1+4*dnu**2))/x+  &
+0.32768d5*x)/0.32768d5
 
-apval = (-375733+0.172174q7*dnu**2+0.32q2*(-28119*dnu**4+3080*dnu**6-40*dnu**8  &
-+(1073-4748*dnu**2+1840*dnu**4-64*dnu**6)*x**2-8*(25-104*dnu**2+  &
-16*dnu**4)*x**4+128*(1-4*dnu**2)*x**6+1024*x**8))/(0.32768q5*x**8)
+apval = (-375733d0+0.172174d7*dnu**2+0.32d2*(-28119d0*dnu**4+3080d0*dnu**6-40*dnu**8  &
++(1073d0-4748d0*dnu**2+1840d0*dnu**4-64d0*dnu**6)*x**2-8*(25d0-104d0*dnu**2+  &
+16*dnu**4)*x**4+128*(1-4*dnu**2)*x**6+1024d0*x**8))/(0.32768d5*x**8)
 
+aval = aval - piover4 - piover2*dnu
+
+end subroutine
+
+subroutine kummer_bessel_phase_asymp(dnu,t,aval,apval,appval)
+implicit double precision (a-h,o-z)
+
+!
+!  Calculate the value of \alpha_nu(z) and its first two derivatives when
+!  \dnu > 1 and the argument z is large (z > 100 dnu or so). 
+!
+!  It uses an asymptotic expansion obtained from Nicholson's formula.
+!
+!
+!  Input parameters:
+!    dnu - the order of the Bessel functions
+!    t - the argument at which to evaluate the phase function
+!
+!  Output parameters:
+!    aval - the value of \alpha_\nu(z)
+!    apval - the value of \alpha'_\nu(z)
+!    appval - the value of \alpha''_\nu(z)
+!
+
+double precision :: ts(0:400),ss(0:400)
+
+
+!
+!  Evaluate \alpha_\nu(z) and its derivatives using the asymptotic expansion.
+!
+
+
+nterms = 30
+if (dnu .lt. 2) nterms = 2*nterms
+
+nn     = nterms-1
+dmu    = 4*dnu**2
+ts(0)  = 1
+do n=1,nn
+ts(n) = ts(n-1) * (dmu - (2*n-1)**2)/4 * (2*n-1)/(2*n)
+ts(n) = ts(n)/(t**2)
+end do
+
+ss(0) = 1
+do n =1,nn
+sum = 0
+do j=1,n-1
+sum   = sum + ts(j)*ss(n-j)
+end do
+ss(n) = -(ts(n) + sum)
+end do
+
+
+aval   = -pi/4 + t
+apval  = ss(0)
+appval = 0
+
+
+do n=1,nn
+aval   = aval   - ss(n)*t/(2*n-1)
+apval  = apval  + ss(n)
+appval = appval - 2*n/t*ss(n)
+end do
+
+!aval = aval - piover4 - piover2*dnu
 
 end subroutine
 
@@ -458,14 +467,7 @@ implicit double precision (a-h,o-z)
 
 double precision u(0:30)
 
-data pi          / 3.141592653589793238462643383279502884197d0 /
-data eulergamma  / 0.577215664901532860606512090082402431042d0 /
-data sqrt2overpi / 0.797884560802865355879892119868763736952d0 /
-data piover2     / 1.570796326794896619231321691639751442099d0 /
-data twopi       / 6.283185307179586476925286766559005768394d0 /
-data sqrtpiover2 / 1.253314137315500251207882642405522626503d0 /
-data piover4     / 0.785398163397448309615660845819875721049d0 /
-
+eps0 = epsilon(0.0d0)
 
 dd    = sqrt(dnu**2-t**2)
 p     = dnu/sqrt(dnu**2-t**2)
@@ -475,499 +477,508 @@ deta  = -dd + dnu * log((dnu+dd)/t)
 ! Compute the coefficients in the expansion
 
 
-u(0) = 1
-u(1) = (0.3q1*p-0.5q1*p**3)/0.24q2
-u(2) = (p**2*(3-0.15q2*p**2)*(1-0.1q1*p**2))/0.48q2+(p**2/0.16q2-  &
-    (5*p**4)/0.24q2+(25*p**6)/0.144q3)/0.8q1
-u(3) = 0.732421875q-1*p**3-0.8912109375q0*p**5+  &
-    0.184646267361111111111111111111111111q1*p**7-  &
-    0.102581259645061728395061728395061728q1*p**9
-u(4) = 0.112152099609375q0*p**4-0.23640869140625q1*p**6+  &
-    0.878912353515625q1*p**8-  &
-    0.112070026162229938271604938271604938q2*p**10+  &
-    0.466958442342624742798353909465020576q1*p**12
-u(5) = 0.227108001708984375q0*p**5-  &
-    0.736879435947963169642857142857142857q1*p**7+  &
-    0.425349987453884548611111111111111111q2*p**9-  &
-    0.918182415432400173611111111111111111q2*p**11+  &
-    0.846362176746007346322016460905349794q2*p**13-  &
-    0.282120725582002448774005486968449931q2*p**15
-u(6) = 0.5725014209747314453125q0*p**6-  &
-    0.264914304869515555245535714285714286q2*p**8+  &
-    0.218190511744211590479290674603174603q3*p**10-  &
-    0.699579627376132541232638888888888889q3*p**12+  &
-    0.10599904525279998779296875q4*p**14-  &
-    0.765252468141181642299489883401920439q3*p**16+  &
-    0.212570130039217122860969412056089011q3*p**18
-u(7) = 0.17277275025844573974609375q1*p**7-  &
-    0.108090919788394655500139508928571429q3*p**9+  &
-    0.12009029132163524627685546875q4*p**11-  &
-    0.530564697861340310838487413194444444q4*p**13+  &
-    0.116553933368645332477710865162037037q5*p**15-  &
-    0.135865500064341374385504075038580247q5*p**17+  &
-    0.806172218173730938450226495222717574q4*p**19-  &
-    0.191945766231840699631006308386361327q4*p**21
-u(8) = 0.60740420012734830379486083984375q1*p**8-  &
-    0.493915304773088012422834123883928571q3*p**10+  &
-    0.710951430248936372143881661551339286q4*p**12-  &
-    0.411926549688975512981414794921875q5*p**14+  &
-    0.122200464983017459787704326488353588q6*p**16-  &
-    0.20340017728041553427816581987713263q6*p**18+  &
-    0.192547001232531532359057820219398362q6*p**20-  &
-    0.969805983886375134885659373122090605q5*p**22+  &
-    0.202042913309661486434512369400435543q5*p**24
-u(9) = 0.243805296995560638606548309326171875q2*p**9-  &
-    0.249983048181120962412519888444380327q4*p**11+  &
-    0.45218768981362726273281233651297433q5*p**13-  &
-    0.331645172484563577831501052493140811q6*p**15+  &
-    0.126836527332162478162596623102823893q7*p**17-  &
-    0.281356322658653411070786835561890988q7*p**19+  &
-    0.376327129765640399640210562227630266q7*p**21-  &
-    0.299801591853810675009134620305442025q7*p**23+  &
-    0.131176361466297720067607155833232776q7*p**25-  &
-    0.242919187900551333458531770061542178q6*p**27
-u(10) = 0.110017140269246738171204924583435059q3*p**10-  &
-    0.138860897537170405319722538644617254q5*p**12+  &
-    0.308186404612662398480390784277102058q6*p**14-  &
-    0.278561812808645468895944456259409587q7*p**16+  &
-    0.132887671664218183294374116316989616q8*p**18-  &
-    0.375671766607633513081631979640619254q8*p**20+  &
-    0.663445122747290266647987984543283835q8*p**22-  &
-    0.74105148211532657748335620964414698q8*p**24+  &
-    0.50952602492664642206381821980499182q8*p**26-  &
-    0.197068191184322269268233898462426092q8*p**28+  &
-    0.328446985307203782113723164104043486q7*p**30
+u(0) = 1d0
+u(1) = (0.3q1*p-0.5q1*p**3)/0.24d2
+u(2) = (p**2*(3-0.15d2*p**2)*(1-0.1d1*p**2))/0.48d2+(p**2/0.16d2-  &
+    (5*p**4)/0.24d2+(25*p**6)/0.144d3)/0.8d1
+u(3) = 0.732421875d-1*p**3-0.8912109375d0*p**5+  &
+    0.184646267361111111111111111111111111d1*p**7-  &
+    0.102581259645061728395061728395061728d1*p**9
+u(4) = 0.112152099609375d0*p**4-0.23640869140625d1*p**6+  &
+    0.878912353515625d1*p**8-  &
+    0.112070026162229938271604938271604938d2*p**10+  &
+    0.466958442342624742798353909465020576d1*p**12
 
-! u(11) = 0.551335896122020585607970133423805237q3*p**11-  &
-!     0.840054336030240852886782812566815556q5*p**13+  &
-!     0.224376817792244942923073778023981318q7*p**15-  &
-!     0.244740627257387284678130081560158608q8*p**17+  &
-!     0.142062907797533095185653278517916247q9*p**19-  &
-!     0.495889784275030309254636245374258461q9*p**21+  &
-!     0.110684281682301446825966666909624581q10*p**23-  &
-!     0.162108055210833707524817588263676888q10*p**25+  &
-!     0.155359689957058005615812104438799617q10*p**27-  &
-!     0.939462359681578402546244300920389077q9*p**29+  &
-!     0.325573074185765749020228086418133106q9*p**31-  &
-!     0.49329253664509961972761831275474713q8*p**33
-! u(12) = 0.303809051092238426861058542272076011q4*p**12-  &
-!     0.549842327572288687134901932937294974q6*p**14+  &
-!     0.173951075539781645381043963142367416q8*p**16-  &
-!     0.225105661889415277804071426963052964q9*p**18+  &
-!     0.155927986487925751334964620474195163q10*p**20-  &
-!     0.656329379261928433203501685097471273q10*p**22+  &
-!     0.179542137311556000801522058538280382q11*p**24-  &
-!     0.330265997498007231400909926757785435q11*p**26+  &
-!     0.412801855797539739551314710270974336q11*p**28-  &
-!     0.346320433881587779229024133355955081q11*p**30+  &
-!     0.186882075092958249223659193027916269q11*p**32-  &
-!     0.586648149205184722761070078443583025q10*p**34+  &
-!     0.814789096118312114945930664504976423q9*p**36
-! u(13) = 0.18257755474293174691169383550004568q5*p**13-  &
-!     0.387183344257261262062662666693114687q7*p**15+  &
-!     0.143157876718888981291057270117829433q9*p**17-  &
-!     0.216716498322379509351841612771120111q10*p**19+  &
-!     0.176347306068349693831519739575843574q11*p**21-  &
-!     0.878670721780232656766359041900689893q11*p**23+  &
-!     0.287900649906150588722913292057201807q12*p**25-  &
-!     0.645364869245376503280883689947469186q12*p**27+  &
-!     0.10081581068653820947691251648300282q13*p**29-  &
-!     0.109837515608122330682706453541519622q13*p**31+  &
-!     0.819218669548577328641303325492162173q12*p**33-  &
-!     0.399096175224466497955234623241855124q12*p**35+  &
-!     0.114498237732025809952776906629561812q12*p**37-  &
-!     0.14679261247695616660612423926866899q11*p**39
-! u(14) = 0.11883842625678325312377214828529759q6*p**14-  &
-!     0.291883881222208134034273203199389529q8*p**16+  &
-!     0.124700929351271032482586837380528715q10*p**18-  &
-!     0.218229277575292237293987756497473379q11*p**20+  &
-!     0.205914503232410015689081725532642961q12*p**22-  &
-!     0.119655288019618159897416068606323116q13*p**24+  &
-!     0.461272578084913196680381603357873686q13*p**26-  &
-!     0.123204913055982871597877006531765418q14*p**28+  &
-!     0.233483640445818409376574678027202736q14*p**30-  &
-!     0.316670885847851584025525678856880023q14*p**32+  &
-!     0.305651255199353206117200368828009531q14*p**34-  &
-!     0.205168994109344373907604779691958581q14*p**36+  &
-!     0.91093411852398989559078765412965912q13*p**38-  &
-!     0.240629790002850396109089159221165641q13*p**40+  &
-!     0.286464035717679042987010903834721001q12*p**42
-! u(15) = 0.832859304016289298975769805899460607q6*p**15-  &
-!     0.234557963522251524776263248340606981q9*p**17+  &
-!     0.114657548994482371569223589595400235q11*p**19-  &
-!     0.229619372968246468165953477323142236q12*p**21+  &
-!     0.248500092803408532364745236563796649q13*p**23-  &
-!     0.166348247248924805186569250601864788q14*p**25+  &
-!     0.743731229086791449411472895371707555q14*p**27-  &
-!     0.232604831188939925232174860601775639q15*p**29+  &
-!     0.523054882578444655579053519617003926q15*p**31-  &
-!     0.857461032982895051396198708919763995q15*p**33+  &
-!     0.102695519608276248881374058059402153q16*p**35-  &
-!     0.889496939881026441812825719177409218q15*p**37+  &
-!     0.542739664987659722702059123968581435q15*p**39-  &
-!     0.221349638702525195965593797940754625q15*p**41+  &
-!     0.541775107551060490049184371877416094q14*p**43-  &
-!     0.601972341723400544499093746530462326q13*p**45
-! u(16) = 0.625295149343479700246652174585454409q7*p**16-  &
-!     0.200164692819177633152993881567114213q10*p**18+  &
-!     0.110997405139179012793740670696533152q12*p**20-  &
-!     0.252155847491285462131253849741840121q13*p**22+  &
-!     0.31007436472896461417190699236272596q14*p**24-  &
-!     0.236652530451649251681776949047977101q15*p**26+  &
-!     0.121267580425034741652590725733823486q16*p**28-  &
-!     0.437932583836401543778009851792875042q16*p**30+  &
-!     0.1148670697844975210969241162584644q17*p**32-  &
-!     0.222682251339111425621938268773683608q17*p**34+  &
-!     0.3213827526858624120000619279550618q17*p**36-  &
-!     0.344472260064851446977970830988029325q17*p**38+  &
-!     0.270547113061970812410141980587939573q17*p**40-  &
-!     0.15129826322457681180846361160344783q17*p**42+  &
-!     0.570578215902367080961869450569376531q16*p**44-  &
-!     0.13010127235496994267986663596889617q16*p**46+  &
-!     0.135522158703093690291527745800933511q15*p**48
-! u(17) = 0.50069589531988925997691486626732342q8*p**17-  &
-!     0.180782203846580637171348543533255393q11*p**19+  &
-!     0.11287091454108740785786249084776509q13*p**21-  &
-!     0.288638376314147602541431630147139463q14*p**23+  &
-!     0.400044457043036241513345081265490388q15*p**25-  &
-!     0.345038551184627249201183192496466485q16*p**27+  &
-!     0.200642714763095308001005208714045857q17*p**29-  &
-!     0.827094565158506427872593795120077537q17*p**31+  &
-!     0.249603651261604257099426249025714789q18*p**33-  &
-!     0.562631788074636028394911699660971604q18*p**35+  &
-!     0.957533509816913866353389551988367794q18*p**37-  &
-!     0.123361169319606950223869780575750905q19*p**39+  &
-!     0.119619911427563078506845902667982026q19*p**41-  &
-!     0.859257798031754799058132886681068178q18*p**43+  &
-!     0.443479546141719040600256670437801662q18*p**45-  &
-!     0.155529835043139025621264893001534908q18*p**47+  &
-!     0.331927647203552220946524331402936401q17*p**49-  &
-!     0.325419261964266883280906207257780785q16*p**51
-! u(18) = 0.425939216504766905188694938317688326q9*p**18-  &
-!     0.172283238717350498735931014691585218q12*p**20+  &
-!     0.120301158264191917280995034461687696q14*p**22-  &
-!     0.343965304743075947469841916872585625q15*p**24+  &
-!     0.533510697870883867550669095248947033q16*p**26-  &
-!     0.516050931934852274365210916337848737q17*p**28+  &
-!     0.337667624979060962298867948957790417q18*p**30-  &
-!     0.157364347651895987190080513032097508q19*p**32+  &
-!     0.540289487671598188722186129704639124q19*p**34-  &
-!     0.139708035164433738547247241132162608q20*p**36+  &
-!     0.275728298165051886494760560218067192q20*p**38-  &
-!     0.417886144465683888175485815664490412q20*p**40+  &
-!     0.485994272932483577515349873427061566q20*p**42-  &
-!     0.430155570383144374234384955992726907q20*p**44+  &
-!     0.284652122516765709765053357384495987q20*p**46-  &
-!     0.136394204105715906568258712897751248q20*p**48+  &
-!     0.447020096401231016929421203971863443q19*p**50-  &
-!     0.896611421527046330159716827547000509q18*p**52+  &
-!     0.830195760673191046444182247728704175q17*p**54
-! u(19) = 0.38362551802304335079166011220849692q10*p**19-  &
-!     0.172770401235299952244209098760703979q13*p**21+  &
-!     0.134124169151806385432441778264118115q15*p**23-  &
-!     0.426193551042689833817774923754940111q16*p**25+  &
-!     0.735166361093097040512846034428751251q17*p**27-  &
-!     0.792165111932383213706735948644990278q18*p**29+  &
-!     0.578988766766465313109222368420406512q19*p**31-  &
-!     0.302556659899037203571814889894839345q20*p**33+  &
-!     0.117074905357972588537637116588312292q21*p**35-  &
-!     0.343462139976841689316772196461324752q21*p**37+  &
-!     0.775670495346113679295356443569489231q21*p**39-  &
-!     0.13602037772849940873131658691020752q22*p**41+  &
-!     0.185710893214634517954552984777922567q22*p**43-  &
-!     0.196772470770531245894838473024836405q22*p**45+  &
-!     0.160168985736935973651488052360912404q22*p**47-  &
-!     0.982443842768985824666146062913387701q21*p**49+  &
-!     0.439279220088871200249738524615433057q21*p**51-  &
-!     0.135121750343599611168339614870098582q21*p**53+  &
-!     0.255638029605292352976324818631861233q20*p**55-  &
-!     0.224243885618677502610811244413913362q19*p**57
-! u(20) = 0.364684008070655585346321894168202385q11*p**20-  &
-!     0.181872620385110372385693316827679152q14*p**22+  &
-!     0.156131239304846727841207996912182678q16*p**24-  &
-!     0.548403360388328965552013880257936702q17*p**26+  &
-!     0.104617211311343439550769871440188984q19*p**28-  &
-!     0.124837009950472331523315265641889206q20*p**30+  &
-!     0.101267741695365924541613177045778763q21*p**32-  &
-!     0.589179413506949638050470515605951253q21*p**34+  &
-!     0.254896111466497158526854530501617133q22*p**36-  &
-!     0.840591581710835044858474095699906146q22*p**38+  &
-!     0.214874148150558827552631088385954108q23*p**40-  &
-!     0.430253430348237847102382496212182648q23*p**42+  &
-!     0.678366164295188322967854720415541027q23*p**44-  &
-!     0.8423222750084322624731938520667074q23*p**46+  &
-!     0.819433100543512964313947466629412804q23*p**48-  &
-!     0.617320630288441459736883722178948112q23*p**50+  &
-!     0.352843584390340937922359793537811146q23*p**52-  &
-!     0.147877435284336144588395567834130703q23*p**54+  &
-!     0.428529608282949395077790047957249349q22*p**56-  &
-!     0.767194393672900405807237969951101091q21*p**58+  &
-!     0.639328661394083671506031641625917576q20*p**60
-! u(21) = 0.364901081884983356528075657200445362q12*p**21-  &
-!     0.200524401236271121541300505690647074q15*p**23+  &
-!     0.189440698425214338628922469111100468q17*p**25-  &
-!     0.731950149156613314562948475204925017q18*p**27+  &
-!     0.153650252184433729805938642944726843q20*p**29-  &
-!     0.201973354193008733681475317642428808q21*p**31+  &
-!     0.180815940571319435847465975699024373q22*p**33-  &
-!     0.116402464614653692797408043708937559q23*p**35+  &
-!     0.559159138036626314349874929646565996q23*p**37-  &
-!     0.205661491362715432982222507351100431q24*p**39+  &
-!     0.589654346197824477149708190362279379q24*p**41-  &
-!     0.13337178907798302247135402844971842q25*p**43+  &
-!     0.239672377443516833876608356229351728q25*p**45-  &
-!     0.34308728985157458476956348796288259q25*p**47+  &
-!     0.390526410353698492882668710535967156q25*p**49-  &
-!     0.351109652833264407896070935796956052q25*p**51+  &
-!     0.246150608540387512290180863147691335q25*p**53-  &
-!     0.131709696180923858372184899510853533q25*p**55+  &
-!     0.519428909476681222690811035361754291q24*p**57-  &
-!     0.142283948233214138089681997481119829q24*p**59+  &
-!     0.241746150089637888288218214489800083q23*p**61-  &
-!     0.191862023880664990704935090864920701q22*p**63
-! u(22) = 0.383353466139394446716143119411149702q13*p**22-  &
-!     0.231091597613235655650143780194709107q16*p**24+  &
-!     0.239202801202699958440948228499700542q18*p**26-  &
-!     0.101218183799420888327604102235739369q20*p**28+  &
-!     0.232753462580894131463350039212914149q21*p**30-  &
-!     0.335446891222267844277594894259904261q22*p**32+  &
-!     0.329755775746147769855229961944775591q23*p**34-  &
-!     0.23361075244869650035568524756138199q24*p**36+  &
-!     0.123852410379245195143560668158290337q25*p**38-  &
-!     0.504635986525440033904484863810565044q25*p**40+  &
-!     0.161031285411373152296094425717467505q26*p**42-  &
-!     0.407750134920654134100989467499011552q26*p**44+  &
-!     0.826258535798955024521169467709696302q26*p**46-  &
-!     0.134591939945564157718973690585097944q27*p**48+  &
-!     0.176357132723266447462519515906348121q27*p**50-  &
-!     0.185267310415499173925336283634739516q27*p**52+  &
-!     0.15480920835773851082483515012954099q27*p**54-  &
-!     0.101480489827663958537369827198177598q27*p**56+  &
-!     0.510392026838880165760676257871113233q26*p**58-  &
-!     0.190068075356644332125244495526161362q26*p**60+  &
-!     0.493618528379066229921354986659832557q25*p**62-  &
-!     0.798002122825655862589501276679921426q24*p**64+  &
-!     0.604547062746708986810228239909031383q23*p**66
-! u(23) = 0.421897157028409649239233596091075079q14*p**23-  &
-!     0.277848110131108086985502155912899076q17*p**25+  &
-!     0.313852832114999959832341577697831212q19*p**27-  &
-!     0.144863877495108634448658092304695329q21*p**29+  &
-!     0.363414998697808752438158646072024245q22*p**31-  &
-!     0.571799190654320517120476029846975743q23*p**33+  &
-!     0.614433992514498807299732556748087018q24*p**35-  &
-!     0.476692460825148068267407437866955436q25*p**37+  &
-!     0.277446649067293931043622397168191097q26*p**39-  &
-!     0.124493420461242815382857106059889454q27*p**41+  &
-!     0.439213056343004793221662806552987429q27*p**43-  &
-!     0.123555291467876091481496997294786449q28*p**45+  &
-!     0.279820689969771709442486291189108562q28*p**47-  &
-!     0.513199843901033287652645518249006018q28*p**49+  &
-!     0.764121653567826736210281085397760232q28*p**51-  &
-!     0.922839502325735629213880187089581365q28*p**53+  &
-!     0.899925584591745293792122769292879603q28*p**55-  &
-!     0.702322235515725071138853041148922393q28*p**57+  &
-!     0.43227737321001869803651614720060867q28*p**59-  &
-!     0.205090299492923282240155705772128658q28*p**61+  &
-!     0.723424323484431846755246063787535509q27*p**63-  &
-!     0.178606809667434939969558427584862639q27*p**65+  &
-!     0.275386300757694611216729218984561521q26*p**67-  &
-!     0.199555290404126529867195086220696754q25*p**69
-! u(24) = 0.485401468685290059984097403002700443q15*p**24-  &
-!     0.347929914392504438547364206951577309q18*p**26+  &
-!     0.427320739570112705505703842861292962q20*p**28-  &
-!     0.214356534151085377171807626462057942q22*p**30+  &
-!     0.584468762928333913223288234050593547q23*p**32-  &
-!     0.100007501389617274844042781709193954q25*p**34+  &
-!     0.116991896918744748527505634234906702q26*p**36-  &
-!     0.989664866169548848319498165944072587q26*p**38+  &
-!     0.629370256208713016903651964894641166q27*p**40-  &
-!     0.309391946830632852904108871866000402q28*p**42+  &
-!     0.119982119676444251414044799592557489q29*p**44-  &
-!     0.372523463410934458791268227865795309q29*p**46+  &
-!     0.935811776488796481399994874894566049q29*p**48-  &
-!     0.19153963148099325448975405732480185q30*p**50+  &
-!     0.320665034398074766313675441936777708q30*p**52-  &
-!     0.439513291807832538857481993151790106q30*p**54+  &
-!     0.492155086983876246272008920145547488q30*p**56-  &
-!     0.447753483879506309074736608172804025q30*p**58+  &
-!     0.327765826563745257946464771429808798q30*p**60-  &
-!     0.190122077675473387503463760467779104q30*p**62+  &
-!     0.853618488227928655762697003154167538q29*p**64-  &
-!     0.285997763835479993168269335966232122q29*p**66+  &
-!     0.67289576509181715851178856497015793q28*p**68-  &
-!     0.991640126840705758542559182202197346q27*p**70+  &
-!     0.68863897697271233232122165430708149q26*p**72
-! u(25) = 0.582724463156690717010908932304741881q16*p**25-  &
-!     0.453053572751259567669131832538230868q19*p**27+  &
-!     0.602963812748747301412305025063943097q21*p**29-  &
-!     0.327612341004452220655939314790969661q23*p**31+  &
-!     0.9675654883193621725064448911954408q24*p**33-  &
-!     0.179410406476179864835911486076657691q26*p**35+  &
-!     0.227643107138493576433115497967817166q27*p**37-  &
-!     0.209145334746779466447417108843487722q28*p**39+  &
-!     0.144711958171198589042735717919910328q29*p**41-  &
-!     0.775778557340413161154171795657503879q29*p**43+  &
-!     0.329009271592913519075724227538688103q30*p**45-  &
-!     0.112102325521359074548928928431884627q31*p**47+  &
-!     0.310346611439110353220627103608681414q31*p**49-  &
-!     0.703605533863648554381753950417772067q31*p**51+  &
-!     0.131287966889026126473398903898172119q32*p**53-  &
-!     0.202087925878518729423312704400064525q32*p**55+  &
-!     0.25653099826522344670515104410063804q32*p**57-  &
-!     0.267713556055940460103523291578851645q32*p**59+  &
-!     0.228230851188564859409123706565701172q32*p**61-  &
-!     0.157303880763014260043291685023510051q32*p**63+  &
-!     0.862735582457135471066934080863805434q31*p**65-  &
-!     0.367622142668141372128248297892215158q31*p**67+  &
-!     0.117284842687447691672641513192630524q31*p**69-  &
-!     0.263552944198074633266385239782829741q30*p**71+  &
-!     0.37195112743738624849499984603261239q29*p**73-  &
-!     0.247967418291590832329999897355074927q28*p**75
-! u(26) = 0.72868573493776565141604525621376617q17*p**26-  &
-!     0.612554285576658352526937229010385347q20*p**28+  &
-!     0.88067442525590322049462380008893813q22*p**30-  &
-!     0.516681854049430391006608796166791152q24*p**32+  &
-!     0.164767891404543973335305261079029487q26*p**34-  &
-!     0.330012135182560679577764369717568937q27*p**36+  &
-!     0.452640960231115837322828138948944663q28*p**38-  &
-!     0.450048304729440029417172221511918296q29*p**40+  &
-!     0.337517046379419754781243380660397961q30*p**42-  &
-!     0.196500936092721938302656844898617027q31*p**44+  &
-!     0.907258060300902704117345146432044022q31*p**46-  &
-!     0.337539584146442548188814368178373599q32*p**48+  &
-!     0.102400737756077566701201070359264036q33*p**50-  &
-!     0.25550854580778980252948947681441991q33*p**52+  &
-!     0.527444349949904443004184046177222035q33*p**54-  &
-!     0.9038465440826322699440166545785235q33*p**56+  &
-!     0.128712819523639475512159681678831072q34*p**58-  &
-!     0.152119132886828244243458028553444786q34*p**60+  &
-!     0.148617497331100771623707721279680334q34*p**62-  &
-!     0.119186492563344309942737754062636946q34*p**64+  &
-!     0.776061590399423944363297223467142657q33*p**66-  &
-!     0.403628535402230097662795118550772433q33*p**68+  &
-!     0.163651606298783030335601535470396996q33*p**70-  &
-!     0.498300387793236212663806690028094697q32*p**72+  &
-!     0.107160399176810385308539346161600272q32*p**74-  &
-!     0.145091935627867085767091189939888216q31*p**76+  &
-!     0.93007651043504542158391788423005267q29*p**78
-! u(27) = 0.947628809926010979086884779955772765q18*p**27-  &
-!     0.858788893725780162669373676626622318q21*p**29+  &
-!     0.13299548584220630219265551482192056q24*p**31-  &
-!     0.840113475121303016930126514196295082q25*p**33+  &
-!     0.288440397189696717887869554466192847q27*p**35-  &
-!     0.622171707867680628661790400753524331q28*p**37+  &
-!     0.919617972562949729960804291040557182q29*p**39-  &
-!     0.986304601898171640470827699878705099q30*p**41+  &
-!     0.798958987760909066438432122029747388q31*p**43-  &
-!     0.503282100104578199385376523864315702q32*p**45+  &
-!     0.251949819456967206681968321189271327q33*p**47-  &
-!     0.101896618454880670032979883846598574q34*p**49+  &
-!     0.337077807950494368230277832166471826q34*p**51-  &
-!     0.920505080526906879187230856848814766q34*p**53+  &
-!     0.208883218830112931301879948063013883q35*p**55-  &
-!     0.395564661836054922793808849979780929q35*p**57+  &
-!     0.626467225082785784826046250321988234q35*p**59-  &
-!     0.829787625121355815326662624913564876q35*p**61+  &
-!     0.917252039823755307698955521203543175q35*p**63-  &
-!     0.842276839848194731574881917498305154q35*p**65+  &
-!     0.637622761225156593446229124075315434q35*p**67-  &
-!     0.393411634413629717269504353059316198q35*p**69+  &
-!     0.194550176112517327863632173093877355q35*p**71-  &
-!     0.752317406868818183619353931245947892q34*p**73+  &
-!     0.219080798339953928980607092703177893q34*p**75-  &
-!     0.451717748724840976453077149509137293q33*p**77+  &
-!     0.587738598856666078034417308992076033q32*p**79-  &
-!     0.36280160423250992471260327715560249q31*p**81
-! u(28) = 0.127972194197597464809724395507420206q20*p**28-  &
-!     0.124688299772818777161634446227009532q23*p**30+  &
-!     0.207441875635037319635660859486024944q25*p**32-  &
-!     0.14071348472035016629245800790564343q27*p**34+  &
-!     0.518747305640549145620873799425137464q28*p**36-  &
-!     0.120174683166421613108482287565520462q30*p**38+  &
-!     0.190874140739905313661484074775955642q31*p**40-  &
-!     0.220168032948989005033893791610109904q32*p**42+  &
-!     0.192032134414573592768649926526294629q33*p**44-  &
-!     0.130440622325443580897000263726395362q34*p**46+  &
-!     0.705451691703004399394120339482779856q34*p**48-  &
-!     0.308911890668890776219406761914755577q35*p**50+  &
-!     0.110939862570461849636570033582640992q36*p**52-  &
-!     0.329949008990161002131493010841869589q36*p**54+  &
-!     0.81851205878295284084400377874190432q36*p**56-  &
-!     0.17020984786957366211242714607773653q37*p**58+  &
-!     0.297598016075494606611560730474645362q37*p**60-  &
-!     0.437972938588663864164837052787908564q37*p**62+  &
-!     0.542118567233165010724497079399741109q37*p**64-  &
-!     0.562777178696641796264092265008556109q37*p**66+  &
-!     0.487432734118452256313590303257907177q37*p**68-  &
-!     0.349394594694567915060403269977363257q37*p**70+  &
-!     0.204829854315357373743912366898554273q37*p**72-  &
-!     0.965426002797982426014269226458744034q36*p**74+  &
-!     0.356816624395007347968513512049201718q36*p**76-  &
-!     0.9956471116118673323268632782714072q35*p**78+  &
-!     0.197163216704581927758826511695555563q35*p**80-  &
-!     0.246895561720328816515044345186316384q34*p**82+  &
-!     0.146961643881148105068478776896616895q33*p**84
-! u(29) = 0.179216232305169897916721793536038038q21*p**29-  &
-!     0.187262146279791821049832736344307165q24*p**31+  &
-!     0.33385826350152459847542649133384709q26*p**33-  &
-!     0.242585953169935201965732844709541638q28*p**35+  &
-!     0.957865464193286072897009316121158832q29*p**37-  &
-!     0.237716180302490067819083589500531345q31*p**39+  &
-!     0.404657983928480464338035797975506122q32*p**41-  &
-!     0.500619443010427433088899543565781836q33*p**43+  &
-!     0.46878990378437433628572686704661886q34*p**45-  &
-!     0.342320728762687259019352879030693498q35*p**47+  &
-!     0.19934438319467844227477340952217572q36*p**49-  &
-!     0.941750298792840249583477469334240457q36*p**51+  &
-!     0.36573420870134447179808148378755076q37*p**53-  &
-!     0.117950702339341789441245738549217699q38*p**55+  &
-!     0.31832373733182758526295358915119921q38*p**57-  &
-!     0.722914703475325383800184872570509971q38*p**59+  &
-!     0.138663798558419485039456798399627025q39*p**61-  &
-!     0.225089229337097793701893551552382588q39*p**63+  &
-!     0.309302090616717379867776026432617642q39*p**65-  &
-!     0.359255480820602776550666501249957224q39*p**67+  &
-!     0.351503405067042401602858723959575374q39*p**69-  &
-!     0.288064296867761390044463051029101265q39*p**71+  &
-!     0.196060276977925167917392163848104373q39*p**73-  &
-!     0.109478187854918280728858429941738711q39*p**75+  &
-!     0.492882093283252148935750460375645305q38*p**77-  &
-!     0.174450359177287393876647917207991552q38*p**79+  &
-!     0.467247527475503683775658411952574931q37*p**81-  &
-!     0.890032231707953932812565438699123475q36*p**83+  &
-!     0.107417939553828178697177850003159704q36*p**85-  &
-!     0.617344480194414820098723275880228185q34*p**87
-! u(30) = 0.259938210272623506103378568041228505q22*p**30-  &
-!     0.290589689578114083694274447444190856q25*p**32+  &
-!     0.553894882372358064456876088014239997q27*p**34-  &
-!     0.430124106779309332728727537629705037q29*p**36+  &
-!     0.181485863689152126812250991545702281q31*p**38-  &
-!     0.481356315631653972836890151266560871q32*p**40+  &
-!     0.876059330567751385801696941038321451q33*p**42-  &
-!     0.115948639043769346146260690197940787q35*p**44+  &
-!     0.116260587126895632542352879202556529q36*p**46-  &
-!     0.910081627318969824575174637972346569q36*p**48+  &
-!     0.568931736273087694960688892363802867q37*p**50-  &
-!     0.289032297964648516435263868487129395q38*p**52+  &
-!     0.120953563882437085571346884880484608q39*p**54-  &
-!     0.421351143570896655549145116732005648q39*p**56+  &
-!     0.123178278913256848218104807523822704q40*p**58-  &
-!     0.304030322110419651339957038500107352q40*p**60+  &
-!     0.63628525400547624061094203648576869q40*p**62-  &
-!     0.113213503462092208797249916812284229q41*p**64+  &
-!     0.171453459953689071017600519067938267q41*p**66-  &
-!     0.220908797987355376205836691410685908q41*p**68+  &
-!     0.241657614051766738273965898242471484q41*p**70-  &
-!     0.223567013700806501418042496295808533q41*p**72+  &
-!     0.173852468068804005636006504464128802q41*p**74-  &
-!     0.112634245548667708407254192796676926q41*p**76+  &
-!     0.600398432028425584659787184910077306q40*p**78-  &
-!     0.258708729989480497111204782670203327q40*p**80+  &
-!     0.878454255266375476299486418444559968q39*p**82-  &
-!     0.226207676137217239572591687258170054q39*p**84+  &
-!     0.41508224435141759059029954571036718q38*p**86-  &
-!     0.483457896052251105989812665423703698q37*p**88+  &
-!     0.26858772002902839221656259190205761q36*p**90
+nterms = 4
+
+if (eps0 .lt. 1.0d-17) then
+u(5) = 0.227108001708984375d0*p**5-  &
+    0.736879435947963169642857142857142857d1*p**7+  &
+    0.425349987453884548611111111111111111d2*p**9-  &
+    0.918182415432400173611111111111111111d2*p**11+  &
+    0.846362176746007346322016460905349794d2*p**13-  &
+    0.282120725582002448774005486968449931d2*p**15
+u(6) = 0.5725014209747314453125d0*p**6-  &
+    0.264914304869515555245535714285714286d2*p**8+  &
+    0.218190511744211590479290674603174603d3*p**10-  &
+    0.699579627376132541232638888888888889d3*p**12+  &
+    0.10599904525279998779296875d4*p**14-  &
+    0.765252468141181642299489883401920439d3*p**16+  &
+    0.212570130039217122860969412056089011d3*p**18
+u(7) = 0.17277275025844573974609375d1*p**7-  &
+    0.108090919788394655500139508928571429d3*p**9+  &
+    0.12009029132163524627685546875d4*p**11-  &
+    0.530564697861340310838487413194444444d4*p**13+  &
+    0.116553933368645332477710865162037037d5*p**15-  &
+    0.135865500064341374385504075038580247d5*p**17+  &
+    0.806172218173730938450226495222717574d4*p**19-  &
+    0.191945766231840699631006308386361327d4*p**21
+
+u(8) = 0.60740420012734830379486083984375d1*p**8-  &
+    0.493915304773088012422834123883928571d3*p**10+  &
+    0.710951430248936372143881661551339286d4*p**12-  &
+    0.411926549688975512981414794921875d5*p**14+  &
+    0.122200464983017459787704326488353588d6*p**16-  &
+    0.20340017728041553427816581987713263d6*p**18+  &
+    0.192547001232531532359057820219398362d6*p**20-  &
+    0.969805983886375134885659373122090605d5*p**22+  &
+    0.202042913309661486434512369400435543d5*p**24
+u(9) = 0.243805296995560638606548309326171875d2*p**9-  &
+    0.249983048181120962412519888444380327d4*p**11+  &
+    0.45218768981362726273281233651297433d5*p**13-  &
+    0.331645172484563577831501052493140811d6*p**15+  &
+    0.126836527332162478162596623102823893d7*p**17-  &
+    0.281356322658653411070786835561890988d7*p**19+  &
+    0.376327129765640399640210562227630266d7*p**21-  &
+    0.299801591853810675009134620305442025d7*p**23+  &
+    0.131176361466297720067607155833232776d7*p**25-  &
+    0.242919187900551333458531770061542178d6*p**27
+u(10) = 0.110017140269246738171204924583435059d3*p**10-  &
+    0.138860897537170405319722538644617254d5*p**12+  &
+    0.308186404612662398480390784277102058d6*p**14-  &
+    0.278561812808645468895944456259409587d7*p**16+  &
+    0.132887671664218183294374116316989616d8*p**18-  &
+    0.375671766607633513081631979640619254d8*p**20+  &
+    0.663445122747290266647987984543283835d8*p**22-  &
+    0.74105148211532657748335620964414698d8*p**24+  &
+    0.50952602492664642206381821980499182d8*p**26-  &
+    0.197068191184322269268233898462426092d8*p**28+  &
+    0.328446985307203782113723164104043486d7*p**30
+
+nterms = 10
+
+endif
+
+! u(11) = 0.551335896122020585607970133423805237d3*p**11-  &
+!     0.840054336030240852886782812566815556d5*p**13+  &
+!     0.224376817792244942923073778023981318d7*p**15-  &
+!     0.244740627257387284678130081560158608d8*p**17+  &
+!     0.142062907797533095185653278517916247d9*p**19-  &
+!     0.495889784275030309254636245374258461d9*p**21+  &
+!     0.110684281682301446825966666909624581d10*p**23-  &
+!     0.162108055210833707524817588263676888d10*p**25+  &
+!     0.155359689957058005615812104438799617d10*p**27-  &
+!     0.939462359681578402546244300920389077d9*p**29+  &
+!     0.325573074185765749020228086418133106d9*p**31-  &
+!     0.49329253664509961972761831275474713d8*p**33
+! u(12) = 0.303809051092238426861058542272076011d4*p**12-  &
+!     0.549842327572288687134901932937294974d6*p**14+  &
+!     0.173951075539781645381043963142367416d8*p**16-  &
+!     0.225105661889415277804071426963052964d9*p**18+  &
+!     0.155927986487925751334964620474195163d10*p**20-  &
+!     0.656329379261928433203501685097471273d10*p**22+  &
+!     0.179542137311556000801522058538280382d11*p**24-  &
+!     0.330265997498007231400909926757785435d11*p**26+  &
+!     0.412801855797539739551314710270974336d11*p**28-  &
+!     0.346320433881587779229024133355955081d11*p**30+  &
+!     0.186882075092958249223659193027916269d11*p**32-  &
+!     0.586648149205184722761070078443583025d10*p**34+  &
+!     0.814789096118312114945930664504976423d9*p**36
+! u(13) = 0.18257755474293174691169383550004568d5*p**13-  &
+!     0.387183344257261262062662666693114687d7*p**15+  &
+!     0.143157876718888981291057270117829433d9*p**17-  &
+!     0.216716498322379509351841612771120111d10*p**19+  &
+!     0.176347306068349693831519739575843574d11*p**21-  &
+!     0.878670721780232656766359041900689893d11*p**23+  &
+!     0.287900649906150588722913292057201807d12*p**25-  &
+!     0.645364869245376503280883689947469186d12*p**27+  &
+!     0.10081581068653820947691251648300282d13*p**29-  &
+!     0.109837515608122330682706453541519622d13*p**31+  &
+!     0.819218669548577328641303325492162173d12*p**33-  &
+!     0.399096175224466497955234623241855124d12*p**35+  &
+!     0.114498237732025809952776906629561812d12*p**37-  &
+!     0.14679261247695616660612423926866899d11*p**39
+! u(14) = 0.11883842625678325312377214828529759d6*p**14-  &
+!     0.291883881222208134034273203199389529d8*p**16+  &
+!     0.124700929351271032482586837380528715d10*p**18-  &
+!     0.218229277575292237293987756497473379d11*p**20+  &
+!     0.205914503232410015689081725532642961d12*p**22-  &
+!     0.119655288019618159897416068606323116d13*p**24+  &
+!     0.461272578084913196680381603357873686d13*p**26-  &
+!     0.123204913055982871597877006531765418d14*p**28+  &
+!     0.233483640445818409376574678027202736d14*p**30-  &
+!     0.316670885847851584025525678856880023d14*p**32+  &
+!     0.305651255199353206117200368828009531d14*p**34-  &
+!     0.205168994109344373907604779691958581d14*p**36+  &
+!     0.91093411852398989559078765412965912d13*p**38-  &
+!     0.240629790002850396109089159221165641d13*p**40+  &
+!     0.286464035717679042987010903834721001d12*p**42
+! u(15) = 0.832859304016289298975769805899460607d6*p**15-  &
+!     0.234557963522251524776263248340606981d9*p**17+  &
+!     0.114657548994482371569223589595400235d11*p**19-  &
+!     0.229619372968246468165953477323142236d12*p**21+  &
+!     0.248500092803408532364745236563796649d13*p**23-  &
+!     0.166348247248924805186569250601864788d14*p**25+  &
+!     0.743731229086791449411472895371707555d14*p**27-  &
+!     0.232604831188939925232174860601775639d15*p**29+  &
+!     0.523054882578444655579053519617003926d15*p**31-  &
+!     0.857461032982895051396198708919763995d15*p**33+  &
+!     0.102695519608276248881374058059402153d16*p**35-  &
+!     0.889496939881026441812825719177409218d15*p**37+  &
+!     0.542739664987659722702059123968581435d15*p**39-  &
+!     0.221349638702525195965593797940754625d15*p**41+  &
+!     0.541775107551060490049184371877416094d14*p**43-  &
+!     0.601972341723400544499093746530462326d13*p**45
+! u(16) = 0.625295149343479700246652174585454409d7*p**16-  &
+!     0.200164692819177633152993881567114213d10*p**18+  &
+!     0.110997405139179012793740670696533152d12*p**20-  &
+!     0.252155847491285462131253849741840121d13*p**22+  &
+!     0.31007436472896461417190699236272596d14*p**24-  &
+!     0.236652530451649251681776949047977101d15*p**26+  &
+!     0.121267580425034741652590725733823486d16*p**28-  &
+!     0.437932583836401543778009851792875042d16*p**30+  &
+!     0.1148670697844975210969241162584644d17*p**32-  &
+!     0.222682251339111425621938268773683608d17*p**34+  &
+!     0.3213827526858624120000619279550618d17*p**36-  &
+!     0.344472260064851446977970830988029325d17*p**38+  &
+!     0.270547113061970812410141980587939573d17*p**40-  &
+!     0.15129826322457681180846361160344783d17*p**42+  &
+!     0.570578215902367080961869450569376531d16*p**44-  &
+!     0.13010127235496994267986663596889617d16*p**46+  &
+!     0.135522158703093690291527745800933511d15*p**48
+! u(17) = 0.50069589531988925997691486626732342d8*p**17-  &
+!     0.180782203846580637171348543533255393d11*p**19+  &
+!     0.11287091454108740785786249084776509d13*p**21-  &
+!     0.288638376314147602541431630147139463d14*p**23+  &
+!     0.400044457043036241513345081265490388d15*p**25-  &
+!     0.345038551184627249201183192496466485d16*p**27+  &
+!     0.200642714763095308001005208714045857d17*p**29-  &
+!     0.827094565158506427872593795120077537d17*p**31+  &
+!     0.249603651261604257099426249025714789d18*p**33-  &
+!     0.562631788074636028394911699660971604d18*p**35+  &
+!     0.957533509816913866353389551988367794d18*p**37-  &
+!     0.123361169319606950223869780575750905d19*p**39+  &
+!     0.119619911427563078506845902667982026d19*p**41-  &
+!     0.859257798031754799058132886681068178d18*p**43+  &
+!     0.443479546141719040600256670437801662d18*p**45-  &
+!     0.155529835043139025621264893001534908d18*p**47+  &
+!     0.331927647203552220946524331402936401d17*p**49-  &
+!     0.325419261964266883280906207257780785d16*p**51
+! u(18) = 0.425939216504766905188694938317688326d9*p**18-  &
+!     0.172283238717350498735931014691585218d12*p**20+  &
+!     0.120301158264191917280995034461687696d14*p**22-  &
+!     0.343965304743075947469841916872585625d15*p**24+  &
+!     0.533510697870883867550669095248947033d16*p**26-  &
+!     0.516050931934852274365210916337848737d17*p**28+  &
+!     0.337667624979060962298867948957790417d18*p**30-  &
+!     0.157364347651895987190080513032097508d19*p**32+  &
+!     0.540289487671598188722186129704639124d19*p**34-  &
+!     0.139708035164433738547247241132162608d20*p**36+  &
+!     0.275728298165051886494760560218067192d20*p**38-  &
+!     0.417886144465683888175485815664490412d20*p**40+  &
+!     0.485994272932483577515349873427061566d20*p**42-  &
+!     0.430155570383144374234384955992726907d20*p**44+  &
+!     0.284652122516765709765053357384495987d20*p**46-  &
+!     0.136394204105715906568258712897751248d20*p**48+  &
+!     0.447020096401231016929421203971863443d19*p**50-  &
+!     0.896611421527046330159716827547000509d18*p**52+  &
+!     0.830195760673191046444182247728704175d17*p**54
+! u(19) = 0.38362551802304335079166011220849692d10*p**19-  &
+!     0.172770401235299952244209098760703979d13*p**21+  &
+!     0.134124169151806385432441778264118115d15*p**23-  &
+!     0.426193551042689833817774923754940111d16*p**25+  &
+!     0.735166361093097040512846034428751251d17*p**27-  &
+!     0.792165111932383213706735948644990278d18*p**29+  &
+!     0.578988766766465313109222368420406512d19*p**31-  &
+!     0.302556659899037203571814889894839345d20*p**33+  &
+!     0.117074905357972588537637116588312292d21*p**35-  &
+!     0.343462139976841689316772196461324752d21*p**37+  &
+!     0.775670495346113679295356443569489231d21*p**39-  &
+!     0.13602037772849940873131658691020752d22*p**41+  &
+!     0.185710893214634517954552984777922567d22*p**43-  &
+!     0.196772470770531245894838473024836405d22*p**45+  &
+!     0.160168985736935973651488052360912404d22*p**47-  &
+!     0.982443842768985824666146062913387701d21*p**49+  &
+!     0.439279220088871200249738524615433057d21*p**51-  &
+!     0.135121750343599611168339614870098582d21*p**53+  &
+!     0.255638029605292352976324818631861233d20*p**55-  &
+!     0.224243885618677502610811244413913362d19*p**57
+! u(20) = 0.364684008070655585346321894168202385d11*p**20-  &
+!     0.181872620385110372385693316827679152d14*p**22+  &
+!     0.156131239304846727841207996912182678d16*p**24-  &
+!     0.548403360388328965552013880257936702d17*p**26+  &
+!     0.104617211311343439550769871440188984d19*p**28-  &
+!     0.124837009950472331523315265641889206d20*p**30+  &
+!     0.101267741695365924541613177045778763d21*p**32-  &
+!     0.589179413506949638050470515605951253d21*p**34+  &
+!     0.254896111466497158526854530501617133d22*p**36-  &
+!     0.840591581710835044858474095699906146d22*p**38+  &
+!     0.214874148150558827552631088385954108d23*p**40-  &
+!     0.430253430348237847102382496212182648d23*p**42+  &
+!     0.678366164295188322967854720415541027d23*p**44-  &
+!     0.8423222750084322624731938520667074d23*p**46+  &
+!     0.819433100543512964313947466629412804d23*p**48-  &
+!     0.617320630288441459736883722178948112d23*p**50+  &
+!     0.352843584390340937922359793537811146d23*p**52-  &
+!     0.147877435284336144588395567834130703d23*p**54+  &
+!     0.428529608282949395077790047957249349d22*p**56-  &
+!     0.767194393672900405807237969951101091d21*p**58+  &
+!     0.639328661394083671506031641625917576d20*p**60
+! u(21) = 0.364901081884983356528075657200445362d12*p**21-  &
+!     0.200524401236271121541300505690647074d15*p**23+  &
+!     0.189440698425214338628922469111100468d17*p**25-  &
+!     0.731950149156613314562948475204925017d18*p**27+  &
+!     0.153650252184433729805938642944726843d20*p**29-  &
+!     0.201973354193008733681475317642428808d21*p**31+  &
+!     0.180815940571319435847465975699024373d22*p**33-  &
+!     0.116402464614653692797408043708937559d23*p**35+  &
+!     0.559159138036626314349874929646565996d23*p**37-  &
+!     0.205661491362715432982222507351100431d24*p**39+  &
+!     0.589654346197824477149708190362279379d24*p**41-  &
+!     0.13337178907798302247135402844971842d25*p**43+  &
+!     0.239672377443516833876608356229351728d25*p**45-  &
+!     0.34308728985157458476956348796288259d25*p**47+  &
+!     0.390526410353698492882668710535967156d25*p**49-  &
+!     0.351109652833264407896070935796956052d25*p**51+  &
+!     0.246150608540387512290180863147691335d25*p**53-  &
+!     0.131709696180923858372184899510853533d25*p**55+  &
+!     0.519428909476681222690811035361754291d24*p**57-  &
+!     0.142283948233214138089681997481119829d24*p**59+  &
+!     0.241746150089637888288218214489800083d23*p**61-  &
+!     0.191862023880664990704935090864920701d22*p**63
+! u(22) = 0.383353466139394446716143119411149702d13*p**22-  &
+!     0.231091597613235655650143780194709107d16*p**24+  &
+!     0.239202801202699958440948228499700542d18*p**26-  &
+!     0.101218183799420888327604102235739369d20*p**28+  &
+!     0.232753462580894131463350039212914149d21*p**30-  &
+!     0.335446891222267844277594894259904261d22*p**32+  &
+!     0.329755775746147769855229961944775591d23*p**34-  &
+!     0.23361075244869650035568524756138199d24*p**36+  &
+!     0.123852410379245195143560668158290337d25*p**38-  &
+!     0.504635986525440033904484863810565044d25*p**40+  &
+!     0.161031285411373152296094425717467505d26*p**42-  &
+!     0.407750134920654134100989467499011552d26*p**44+  &
+!     0.826258535798955024521169467709696302d26*p**46-  &
+!     0.134591939945564157718973690585097944d27*p**48+  &
+!     0.176357132723266447462519515906348121d27*p**50-  &
+!     0.185267310415499173925336283634739516d27*p**52+  &
+!     0.15480920835773851082483515012954099d27*p**54-  &
+!     0.101480489827663958537369827198177598d27*p**56+  &
+!     0.510392026838880165760676257871113233d26*p**58-  &
+!     0.190068075356644332125244495526161362d26*p**60+  &
+!     0.493618528379066229921354986659832557d25*p**62-  &
+!     0.798002122825655862589501276679921426d24*p**64+  &
+!     0.604547062746708986810228239909031383d23*p**66
+! u(23) = 0.421897157028409649239233596091075079d14*p**23-  &
+!     0.277848110131108086985502155912899076d17*p**25+  &
+!     0.313852832114999959832341577697831212d19*p**27-  &
+!     0.144863877495108634448658092304695329d21*p**29+  &
+!     0.363414998697808752438158646072024245d22*p**31-  &
+!     0.571799190654320517120476029846975743d23*p**33+  &
+!     0.614433992514498807299732556748087018d24*p**35-  &
+!     0.476692460825148068267407437866955436d25*p**37+  &
+!     0.277446649067293931043622397168191097d26*p**39-  &
+!     0.124493420461242815382857106059889454d27*p**41+  &
+!     0.439213056343004793221662806552987429d27*p**43-  &
+!     0.123555291467876091481496997294786449d28*p**45+  &
+!     0.279820689969771709442486291189108562d28*p**47-  &
+!     0.513199843901033287652645518249006018d28*p**49+  &
+!     0.764121653567826736210281085397760232d28*p**51-  &
+!     0.922839502325735629213880187089581365d28*p**53+  &
+!     0.899925584591745293792122769292879603d28*p**55-  &
+!     0.702322235515725071138853041148922393d28*p**57+  &
+!     0.43227737321001869803651614720060867d28*p**59-  &
+!     0.205090299492923282240155705772128658d28*p**61+  &
+!     0.723424323484431846755246063787535509d27*p**63-  &
+!     0.178606809667434939969558427584862639d27*p**65+  &
+!     0.275386300757694611216729218984561521d26*p**67-  &
+!     0.199555290404126529867195086220696754d25*p**69
+! u(24) = 0.485401468685290059984097403002700443d15*p**24-  &
+!     0.347929914392504438547364206951577309d18*p**26+  &
+!     0.427320739570112705505703842861292962d20*p**28-  &
+!     0.214356534151085377171807626462057942d22*p**30+  &
+!     0.584468762928333913223288234050593547d23*p**32-  &
+!     0.100007501389617274844042781709193954d25*p**34+  &
+!     0.116991896918744748527505634234906702d26*p**36-  &
+!     0.989664866169548848319498165944072587d26*p**38+  &
+!     0.629370256208713016903651964894641166d27*p**40-  &
+!     0.309391946830632852904108871866000402d28*p**42+  &
+!     0.119982119676444251414044799592557489d29*p**44-  &
+!     0.372523463410934458791268227865795309d29*p**46+  &
+!     0.935811776488796481399994874894566049d29*p**48-  &
+!     0.19153963148099325448975405732480185d30*p**50+  &
+!     0.320665034398074766313675441936777708d30*p**52-  &
+!     0.439513291807832538857481993151790106d30*p**54+  &
+!     0.492155086983876246272008920145547488d30*p**56-  &
+!     0.447753483879506309074736608172804025d30*p**58+  &
+!     0.327765826563745257946464771429808798d30*p**60-  &
+!     0.190122077675473387503463760467779104d30*p**62+  &
+!     0.853618488227928655762697003154167538d29*p**64-  &
+!     0.285997763835479993168269335966232122d29*p**66+  &
+!     0.67289576509181715851178856497015793d28*p**68-  &
+!     0.991640126840705758542559182202197346d27*p**70+  &
+!     0.68863897697271233232122165430708149d26*p**72
+! u(25) = 0.582724463156690717010908932304741881d16*p**25-  &
+!     0.453053572751259567669131832538230868d19*p**27+  &
+!     0.602963812748747301412305025063943097d21*p**29-  &
+!     0.327612341004452220655939314790969661d23*p**31+  &
+!     0.9675654883193621725064448911954408d24*p**33-  &
+!     0.179410406476179864835911486076657691d26*p**35+  &
+!     0.227643107138493576433115497967817166d27*p**37-  &
+!     0.209145334746779466447417108843487722d28*p**39+  &
+!     0.144711958171198589042735717919910328d29*p**41-  &
+!     0.775778557340413161154171795657503879d29*p**43+  &
+!     0.329009271592913519075724227538688103d30*p**45-  &
+!     0.112102325521359074548928928431884627d31*p**47+  &
+!     0.310346611439110353220627103608681414d31*p**49-  &
+!     0.703605533863648554381753950417772067d31*p**51+  &
+!     0.131287966889026126473398903898172119d32*p**53-  &
+!     0.202087925878518729423312704400064525d32*p**55+  &
+!     0.25653099826522344670515104410063804d32*p**57-  &
+!     0.267713556055940460103523291578851645d32*p**59+  &
+!     0.228230851188564859409123706565701172d32*p**61-  &
+!     0.157303880763014260043291685023510051d32*p**63+  &
+!     0.862735582457135471066934080863805434d31*p**65-  &
+!     0.367622142668141372128248297892215158d31*p**67+  &
+!     0.117284842687447691672641513192630524d31*p**69-  &
+!     0.263552944198074633266385239782829741d30*p**71+  &
+!     0.37195112743738624849499984603261239d29*p**73-  &
+!     0.247967418291590832329999897355074927d28*p**75
+! u(26) = 0.72868573493776565141604525621376617d17*p**26-  &
+!     0.612554285576658352526937229010385347d20*p**28+  &
+!     0.88067442525590322049462380008893813d22*p**30-  &
+!     0.516681854049430391006608796166791152d24*p**32+  &
+!     0.164767891404543973335305261079029487d26*p**34-  &
+!     0.330012135182560679577764369717568937d27*p**36+  &
+!     0.452640960231115837322828138948944663d28*p**38-  &
+!     0.450048304729440029417172221511918296d29*p**40+  &
+!     0.337517046379419754781243380660397961d30*p**42-  &
+!     0.196500936092721938302656844898617027d31*p**44+  &
+!     0.907258060300902704117345146432044022d31*p**46-  &
+!     0.337539584146442548188814368178373599d32*p**48+  &
+!     0.102400737756077566701201070359264036d33*p**50-  &
+!     0.25550854580778980252948947681441991d33*p**52+  &
+!     0.527444349949904443004184046177222035d33*p**54-  &
+!     0.9038465440826322699440166545785235d33*p**56+  &
+!     0.128712819523639475512159681678831072d34*p**58-  &
+!     0.152119132886828244243458028553444786d34*p**60+  &
+!     0.148617497331100771623707721279680334d34*p**62-  &
+!     0.119186492563344309942737754062636946d34*p**64+  &
+!     0.776061590399423944363297223467142657d33*p**66-  &
+!     0.403628535402230097662795118550772433d33*p**68+  &
+!     0.163651606298783030335601535470396996d33*p**70-  &
+!     0.498300387793236212663806690028094697d32*p**72+  &
+!     0.107160399176810385308539346161600272d32*p**74-  &
+!     0.145091935627867085767091189939888216d31*p**76+  &
+!     0.93007651043504542158391788423005267d29*p**78
+! u(27) = 0.947628809926010979086884779955772765d18*p**27-  &
+!     0.858788893725780162669373676626622318d21*p**29+  &
+!     0.13299548584220630219265551482192056d24*p**31-  &
+!     0.840113475121303016930126514196295082d25*p**33+  &
+!     0.288440397189696717887869554466192847d27*p**35-  &
+!     0.622171707867680628661790400753524331d28*p**37+  &
+!     0.919617972562949729960804291040557182d29*p**39-  &
+!     0.986304601898171640470827699878705099d30*p**41+  &
+!     0.798958987760909066438432122029747388d31*p**43-  &
+!     0.503282100104578199385376523864315702d32*p**45+  &
+!     0.251949819456967206681968321189271327d33*p**47-  &
+!     0.101896618454880670032979883846598574d34*p**49+  &
+!     0.337077807950494368230277832166471826d34*p**51-  &
+!     0.920505080526906879187230856848814766d34*p**53+  &
+!     0.208883218830112931301879948063013883d35*p**55-  &
+!     0.395564661836054922793808849979780929d35*p**57+  &
+!     0.626467225082785784826046250321988234d35*p**59-  &
+!     0.829787625121355815326662624913564876d35*p**61+  &
+!     0.917252039823755307698955521203543175d35*p**63-  &
+!     0.842276839848194731574881917498305154d35*p**65+  &
+!     0.637622761225156593446229124075315434d35*p**67-  &
+!     0.393411634413629717269504353059316198d35*p**69+  &
+!     0.194550176112517327863632173093877355d35*p**71-  &
+!     0.752317406868818183619353931245947892d34*p**73+  &
+!     0.219080798339953928980607092703177893d34*p**75-  &
+!     0.451717748724840976453077149509137293d33*p**77+  &
+!     0.587738598856666078034417308992076033d32*p**79-  &
+!     0.36280160423250992471260327715560249d31*p**81
+! u(28) = 0.127972194197597464809724395507420206d20*p**28-  &
+!     0.124688299772818777161634446227009532d23*p**30+  &
+!     0.207441875635037319635660859486024944d25*p**32-  &
+!     0.14071348472035016629245800790564343d27*p**34+  &
+!     0.518747305640549145620873799425137464d28*p**36-  &
+!     0.120174683166421613108482287565520462d30*p**38+  &
+!     0.190874140739905313661484074775955642d31*p**40-  &
+!     0.220168032948989005033893791610109904d32*p**42+  &
+!     0.192032134414573592768649926526294629d33*p**44-  &
+!     0.130440622325443580897000263726395362d34*p**46+  &
+!     0.705451691703004399394120339482779856d34*p**48-  &
+!     0.308911890668890776219406761914755577d35*p**50+  &
+!     0.110939862570461849636570033582640992d36*p**52-  &
+!     0.329949008990161002131493010841869589d36*p**54+  &
+!     0.81851205878295284084400377874190432d36*p**56-  &
+!     0.17020984786957366211242714607773653d37*p**58+  &
+!     0.297598016075494606611560730474645362d37*p**60-  &
+!     0.437972938588663864164837052787908564d37*p**62+  &
+!     0.542118567233165010724497079399741109d37*p**64-  &
+!     0.562777178696641796264092265008556109d37*p**66+  &
+!     0.487432734118452256313590303257907177d37*p**68-  &
+!     0.349394594694567915060403269977363257d37*p**70+  &
+!     0.204829854315357373743912366898554273d37*p**72-  &
+!     0.965426002797982426014269226458744034d36*p**74+  &
+!     0.356816624395007347968513512049201718d36*p**76-  &
+!     0.9956471116118673323268632782714072d35*p**78+  &
+!     0.197163216704581927758826511695555563d35*p**80-  &
+!     0.246895561720328816515044345186316384d34*p**82+  &
+!     0.146961643881148105068478776896616895d33*p**84
+! u(29) = 0.179216232305169897916721793536038038d21*p**29-  &
+!     0.187262146279791821049832736344307165d24*p**31+  &
+!     0.33385826350152459847542649133384709d26*p**33-  &
+!     0.242585953169935201965732844709541638d28*p**35+  &
+!     0.957865464193286072897009316121158832d29*p**37-  &
+!     0.237716180302490067819083589500531345d31*p**39+  &
+!     0.404657983928480464338035797975506122d32*p**41-  &
+!     0.500619443010427433088899543565781836d33*p**43+  &
+!     0.46878990378437433628572686704661886d34*p**45-  &
+!     0.342320728762687259019352879030693498d35*p**47+  &
+!     0.19934438319467844227477340952217572d36*p**49-  &
+!     0.941750298792840249583477469334240457d36*p**51+  &
+!     0.36573420870134447179808148378755076d37*p**53-  &
+!     0.117950702339341789441245738549217699d38*p**55+  &
+!     0.31832373733182758526295358915119921d38*p**57-  &
+!     0.722914703475325383800184872570509971d38*p**59+  &
+!     0.138663798558419485039456798399627025d39*p**61-  &
+!     0.225089229337097793701893551552382588d39*p**63+  &
+!     0.309302090616717379867776026432617642d39*p**65-  &
+!     0.359255480820602776550666501249957224d39*p**67+  &
+!     0.351503405067042401602858723959575374d39*p**69-  &
+!     0.288064296867761390044463051029101265d39*p**71+  &
+!     0.196060276977925167917392163848104373d39*p**73-  &
+!     0.109478187854918280728858429941738711d39*p**75+  &
+!     0.492882093283252148935750460375645305d38*p**77-  &
+!     0.174450359177287393876647917207991552d38*p**79+  &
+!     0.467247527475503683775658411952574931d37*p**81-  &
+!     0.890032231707953932812565438699123475d36*p**83+  &
+!     0.107417939553828178697177850003159704d36*p**85-  &
+!     0.617344480194414820098723275880228185d34*p**87
+! u(30) = 0.259938210272623506103378568041228505d22*p**30-  &
+!     0.290589689578114083694274447444190856d25*p**32+  &
+!     0.553894882372358064456876088014239997d27*p**34-  &
+!     0.430124106779309332728727537629705037d29*p**36+  &
+!     0.181485863689152126812250991545702281d31*p**38-  &
+!     0.481356315631653972836890151266560871d32*p**40+  &
+!     0.876059330567751385801696941038321451d33*p**42-  &
+!     0.115948639043769346146260690197940787d35*p**44+  &
+!     0.116260587126895632542352879202556529d36*p**46-  &
+!     0.910081627318969824575174637972346569d36*p**48+  &
+!     0.568931736273087694960688892363802867d37*p**50-  &
+!     0.289032297964648516435263868487129395d38*p**52+  &
+!     0.120953563882437085571346884880484608d39*p**54-  &
+!     0.421351143570896655549145116732005648d39*p**56+  &
+!     0.123178278913256848218104807523822704d40*p**58-  &
+!     0.304030322110419651339957038500107352d40*p**60+  &
+!     0.63628525400547624061094203648576869d40*p**62-  &
+!     0.113213503462092208797249916812284229d41*p**64+  &
+!     0.171453459953689071017600519067938267d41*p**66-  &
+!     0.220908797987355376205836691410685908d41*p**68+  &
+!     0.241657614051766738273965898242471484d41*p**70-  &
+!     0.223567013700806501418042496295808533d41*p**72+  &
+!     0.173852468068804005636006504464128802d41*p**74-  &
+!     0.112634245548667708407254192796676926d41*p**76+  &
+!     0.600398432028425584659787184910077306d40*p**78-  &
+!     0.258708729989480497111204782670203327d40*p**80+  &
+!     0.878454255266375476299486418444559968d39*p**82-  &
+!     0.226207676137217239572591687258170054d39*p**84+  &
+!     0.41508224435141759059029954571036718d38*p**86-  &
+!     0.483457896052251105989812665423703698d37*p**88+  &
+!     0.26858772002902839221656259190205761d36*p**90
 
 
 !
@@ -979,7 +990,7 @@ dsum2 = 0
 
 xx    = 1
 zz    = 1
-do i=0,10
+do i=0,nterms
 dsum1 = dsum1 + u(i)*xx
 dsum2 = dsum2 + u(i)*zz*xx
 
@@ -988,7 +999,7 @@ zz    = -zz
 end do
 
 bval1 = -deta  + log(dsum1) - 0.5d0*log(2*pi*dd)  
-bval2 =  deta  + log(dsum2) + 0.5d0  * log ( 2 / (pi*dd)) 
+bval2 =  deta  + log(dsum2) + 0.5d0*log (2/ (pi*dd)) 
 
 valj  = exp(bval1)
 valy  = -exp(bval2)
@@ -996,19 +1007,74 @@ valy  = -exp(bval2)
 end subroutine
 
 
+
+subroutine bessel_taylor(dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
+implicit double precision (a-h,o-z)
+
+!
+!  Use Taylor expansions to evaluate J_\nu(t), Y_\nu(t), and the related quantities
+!  in the event that dnu and t are smallish.
+!
+!  Input parameters:
+!    dnu - the order of the Bessel functions to evaluate
+!    t - the location at which to evaluate them
+!
+!  Output parameters:
+!    valj - the value of J_dnu(t)
+!    valy - the value of Y_dnu(t)
+!    alpha - the value of the phase function \alpha such that (1) and (2) hold
+!    alphader - the value of the derivative of the the phase function \alpha such that
+!      (1) and (2) hold
+!    vallogj - the value of \log( J_\nu(t) ) when in the nonoscillatory region
+!    vallogy - the value of \log(-Y_\nu(t) ) when in the nonoscillatory region
+!  
+
+alpha    = 0
+alphader = 0
+vallogj  = 0
+vallogy  = 0
+valj     = 0
+valy     = 0
+
+ifoscillatory = 0
+
+if (dnu .lt. 0.5d0) then
+ifoscillatory = 1
+else
+if (t .ge. sqrt(dnu**2-0.25d0)) ifoscillatory = 1
+endif
+
+
+if (ifoscillatory .eq. 1) then
+call bessel_taylorj(dnu,t,valj)
+call bessel_taylory(dnu,t,valy)
+alphader = 2/(pi*t) * 1/(valj**2 + valy**2)
+alpha    = atan2(valy,valj)
+else
+call bessel_taylorj_log(dnu,t,vallogj)
+call bessel_taylory_log(dnu,t,vallogy)
+valj = exp(vallogj)
+valy = -exp(vallogy)
+endif
+
+
+end subroutine
+
+
+
+
 subroutine bessel_taylorj(dnu,t,val)
 implicit double precision (a-h,o-z)
 
 !
-!  Evaluate J_\nu(t) using its Taylor expansion.
+!  Evaluate J_dnu(t) using its Taylor expansion in the event that
+!  t and dnu are of small magnitude and NOT A NEGATIVE INTEGER.
 !
 
-data pi          / 3.141592653589793238462643383279502884197d0 /
-
-maxterms = 16
-eps0     = 1.0d-17
+maxterms = 30
+eps0     = epsilon(0.0d0)/10.0d0
 val      = 0.0d0
-dd       = 1.0d0/gamma(dnu+1.0d0) * (t/2)**dnu
+ dd      = 1.0d0/bessel_gamma(dnu+1.0d0) * (t/2)**dnu
 
 do i=0,maxterms
 val = val + dd
@@ -1016,38 +1082,42 @@ if (abs(dd) .lt. eps0*abs(val)) exit
 dd  = -dd/(dnu+i+1.0d0) * 1/(i+1.0d0) * (t/2)**2
 end do
 
-end subroutine
 
+end subroutine
 
 
 subroutine bessel_taylory(dnu,t,val)
 implicit double precision (a-h,o-z)
 
-dimension xs(14),vals(14)
+!
+!  Evaluate Y_dnu(t) in the event that t and dnu >0 are of small magnitude
+!  using series expansions.
+!
 
-data pi / 3.141592653589793238462643383279502884197d0 /
+dimension xs(30), vals(30)
+! dimension xs(14),vals(14)
 
-data xs / -1.000000000000000000000000000000000000d0, &
-          -0.970941817426052027156982276293789257d0, &    
-          -0.885456025653209895900375522015098685d0, &    
-          -0.748510748171101098634630599701351216d0, &     
-          -0.568064746731155802511807559127516441d0, &     
-          -0.354604887042535625969637892600018341d0, &     
-          -0.120536680255323053349067687452543496d0, &     
-           0.120536680255323053349067687452543592d0, &     
-           0.354604887042535625969637892600018582d0, &     
-           0.568064746731155802511807559127516730d0, &     
-           0.748510748171101098634630599701351409d0, &     
-           0.885456025653209895900375522015098877d0, &    
-           0.970941817426052027156982276293789257d0, &     
-           1.000000000000000000000000000000000000d0  /
+! data xs / -1.000000000000000000000000000000000000d0, &
+!           -0.970941817426052027156982276293789257d0, &    
+!           -0.885456025653209895900375522015098685d0, &    
+!           -0.748510748171101098634630599701351216d0, &     
+!           -0.568064746731155802511807559127516441d0, &     
+!           -0.354604887042535625969637892600018341d0, &     
+!           -0.120536680255323053349067687452543496d0, &     
+!            0.120536680255323053349067687452543592d0, &     
+!            0.354604887042535625969637892600018582d0, &     
+!            0.568064746731155802511807559127516730d0, &     
+!            0.748510748171101098634630599701351409d0, &     
+!            0.885456025653209895900375522015098877d0, &    
+!            0.970941817426052027156982276293789257d0, &     
+!            1.000000000000000000000000000000000000d0  /
 
 !
 !  Evaluate Y_\nu(t) using taylor expansions
 !
 
-maxterms = 16
-eps0     = 1.0d-17
+maxterms = 30
+eps0     = epsilon(0.0d0)/10
 
 ndnu = nint(dnu)
 dnu0 = ndnu
@@ -1062,23 +1132,29 @@ diff = dnu-dnu0
 
 if (abs(diff) .lt. 0.01d0) then
 
+
 a = dnu0-0.1d0
 b = dnu0+0.1d0
-n = 14
+n = 12
+
+if (eps0 .lt. 1.0d-17) then
+n = 20
+endif
 
 !
 !  The commented code constructs the n-point Chebyshev grid on the interval [-1,1].
 !  Right now, the 14-point grid is used and the points have been precomputed.
 !
 
-! if (n .eq. 1) then
-! xs(1) = 0.0d0
-! else
-! h = pi/(n-1)
-! do i=1,n
-! xs(n-i+1) = cos(h*(i-1))
-! end do
-! endif
+if (n .eq. 1) then
+xs(1) = 0.0d0
+else
+h = pi/(n-1)
+do i=1,n
+xs(n-i+1) = cos(h*(i-1))
+end do
+endif
+
 
 !
 !  Evaluate Y_\nu at the nodes of the Chebyshev grid on the interval [a,b]
@@ -1106,8 +1182,9 @@ do i=1,n
 dd=1.0d0
 if (i .eq. 1 .OR. i .eq. n) dd = 0.5d0
 diff = xx-xs(i)
+
 !
-!  Handle the case in which the target node coincide with one of
+!  Handle the case in which the target node coincides with one of
 !  of the Chebyshev nodes.
 !
 if(abs(diff) .le. eps0) then
@@ -1116,7 +1193,7 @@ return
 endif
 
 !
-!  Otherwise, construct the sums.
+!  Otherwise, calculate the sums.
 !
 
 dd   = (dd1*dd)/diff
@@ -1136,13 +1213,216 @@ endif
 !  Handle the case of noninteger dnu which is not close to an integer value
 !
 
-
 call bessel_taylorj(dnu,t,val1)
 call bessel_taylorj(-dnu,t,val2)
-
 val    = (cos(pi*dnu) * val1 - val2) / sin(pi*dnu)
 
 end subroutine
+
+
+subroutine bessel_taylorj_log(dnu,t,vallog)
+implicit double precision (a-h,o-z)
+
+!
+!  Evaluate the logarithm of J_dnu(t) when t is in the nonoscillatory regime,
+!  and dnu is positive and of small magnitude
+!
+
+
+
+maxterms = 30
+eps0     = epsilon(0.0d0)/10.0d0
+val      = 0.0d0
+
+dsum = 0
+dd   = 1.0d0
+
+do i=0,maxterms
+dsum = dsum + dd
+dd = -dd * (t/2)**2 * 1.0d0/(i+1.0d0) *  1.0d0/(dnu+i+1.0d0)
+if (abs(dd) .lt. eps0*abs(dsum)) exit
+end do
+
+vallog = -log(bessel_gamma(dnu+1)) + dnu * log(t/2) + log(dsum)
+
+
+end subroutine
+
+
+
+subroutine bessel_taylorj_log2(dnu,t,dsign,vallog)
+implicit double precision (a-h,o-z)
+
+!
+!  Evaluate the logarithm of |J_dnu(t)| when t is in the nonoscillatory regime,
+!  and dnu is negative and of small magnitude
+!
+
+
+maxterms = 30
+eps0     = epsilon(0.0d0)/10.0d0
+val      = 0.0d0
+dsum     = 0
+
+dd   = 1.0d0/bessel_gamma(dnu+1)
+xx   = (t/2)**2
+
+do i=0,maxterms
+dsum = dsum + dd
+dd = -dd * xx * 1.0d0/(i+1.0d0) *  1.0d0/(dnu+i+1.0d0)
+if (abs(dd) .lt. eps0*abs(dsum)) exit
+end do
+
+dsign = 1.0d0
+if (dsum .le. 0) then
+dsign = -1.0d0
+dsum  = - dsum
+endif
+
+vallog = dnu * log(t/2) + log(dsum)
+
+end subroutine
+
+
+
+subroutine bessel_taylory_log(dnu,t,vallog)
+implicit double precision (a-h,o-z)
+
+double precision ::  xs(30),vals(30)
+
+! double precision ::  xs(14),vals(14)
+! data xs / -1.000000000000000000000000000000000000d0, &
+!           -0.970941817426052027156982276293789257d0, &    
+!           -0.885456025653209895900375522015098685d0, &    
+!           -0.748510748171101098634630599701351216d0, &     
+!           -0.568064746731155802511807559127516441d0, &     
+!           -0.354604887042535625969637892600018341d0, &     
+!           -0.120536680255323053349067687452543496d0, &     
+!            0.120536680255323053349067687452543592d0, &     
+!            0.354604887042535625969637892600018582d0, &     
+!            0.568064746731155802511807559127516730d0, &     
+!            0.748510748171101098634630599701351409d0, &     
+!            0.885456025653209895900375522015098877d0, &    
+!            0.970941817426052027156982276293789257d0, &     
+!            1.000000000000000000000000000000000000d0  /
+
+eps0 = epsilon(0.0d0)
+
+!
+!  Evaluate the logarithm of - Y_dnu(t) when dnu is positive and of small
+!  magnitude and (dnu,t) is in the nonoscillatory region.
+!
+
+ndnu = nint(dnu)
+dnu0 = ndnu
+diff = dnu-dnu0
+
+!
+!  Handle the case when dnu is close to an integer through Chebyshev interpolation.
+!  The number of interpolation nodes is probably excessive here and the code
+!  could be accelerated by precomputing the nodes.
+!  
+
+if (abs(diff) .lt. 0.01d0) then
+
+a = dnu0-0.1d0
+b = dnu0+0.1d0
+n = 12
+
+if (eps0 .lt. 1.0d-17) then
+n = 20
+endif
+
+
+
+!
+!  The commented code constructs the n-point Chebyshev grid on the interval [-1,1].
+!
+
+if (n .eq. 1) then
+xs(1) = 0.0d0
+else
+h = pi/(n-1)
+do i=1,n
+xs(n-i+1) = cos(h*(i-1))
+end do
+endif
+
+! do i=1,n
+! print *,xs(i)
+! end do
+
+!
+!  Evaluate Y_\nu at the nodes of the Chebyshev grid on the interval [a,b]
+!
+
+do i=1,n
+x0    = xs(i) *(b-a)/2 + (b+a)/2
+call bessel_taylory_log0(x0,t,vals(i))
+end do
+
+!
+!  Interpolate using the barycentric formula
+!
+
+xx   = (2*dnu - (b+a) ) /(b-a)
+
+sum1 = 0
+sum2 = 0
+dd1  = 1.0d0
+do i=1,n
+dd=1.0d0
+if (i .eq. 1 .OR. i .eq. n) dd = 0.5d0
+diff = xx-xs(i)
+!
+!  Handle the case in which the target node coincide with one of
+!  of the Chebyshev nodes.
+!
+if(abs(diff) .le. eps0) then
+vallog = vals(i)
+return
+endif
+
+!
+!  Otherwise, construct the sums.
+!
+
+dd   = (dd1*dd)/diff
+dd1  = - dd1
+sum1 = sum1+dd*vals(i)
+sum2 = sum2+dd
+dd   = - dd
+end do
+
+vallog    = sum1/sum2
+
+else
+
+call bessel_taylory_log0(dnu,t,vallog)
+
+endif
+
+
+end subroutine
+
+
+subroutine bessel_taylory_log0(dnu,t,vallog)
+implicit double precision (a-h,o-z)
+
+!
+!  Evaluate the logarithm of -Y_\nu(t) when t is in the nonoscillatory regime
+!  and \nu is not close to an integer. 
+!
+
+call bessel_taylorj_log(dnu,t,vallog1)
+call bessel_taylorj_log2(-dnu,t,dsign,vallog2)
+
+dd     = exp(vallog1 - vallog2)
+vallog = vallog2 + log(dsign * 1/sin(pi*dnu) - cos(pi*dnu)/sin(pi*dnu)*dd ) 
+
+end subroutine
+
+
 
 
 subroutine bessel_tensor_eval(ncoefs1,coefs1,ncoefs2,coefs2,iptr1,iptr2,a,b,c,d,x,y,val1,val2)
@@ -1175,6 +1455,7 @@ nj    =  coefs1(iptr)
 iptr  = iptr+1
 do i=0,nj
 val1    = val1 + coefs1(iptr)*polsx(i+1)*polsy(j+1)
+
 iptr   = iptr+1
 end do
 end do
@@ -1276,3 +1557,302 @@ a = ab(1,int)
 b = ab(2,int)
 
 end subroutine
+
+
+subroutine bessel_eval_init(dsize)
+implicit double precision (a-h,o-z)
+
+!
+!  Read the precomputed expansions from a binary file stored on the disk into
+!  the expdata1 and expdata2 structures defined above.
+!
+!  Input parameters:
+!   None
+!
+!  Output parameters:
+!   dsize - a (pretty good) estimate of the  memory occupied by the table read 
+!     from the disk, in megabytes
+! 
+!
+
+eps = epsilon(0.0d0)
+
+if (eps .lt. 1.0d-17) then
+
+iw = 20
+open (iw, FILE = 'bessel_data16.bin', form = 'UNFORMATTED', status = 'OLD', access = 'stream', err = 1000)
+call read_expansion16(iw,expdata1)
+call read_expansion16(iw,expdata2)
+close (iw)
+
+dsize = expdata1%dmemory + expdata2%dmemory
+dsize = dsize*2
+
+else
+
+iw = 20
+open (iw, FILE = 'bessel_data.bin', form = 'UNFORMATTED', status = 'OLD', access = 'stream', err = 1000)
+call read_expansion(iw,expdata1)
+call read_expansion(iw,expdata2)
+close (iw)
+
+dsize = expdata1%dmemory + expdata2%dmemory
+
+endif
+
+
+nintsab      = expdata1%nintsab
+nintscd      = expdata1%nintscd
+ncoefsalphap = expdata1%ncoefsalphap
+! ncoefsalpha  = expdata1%ncoefsalpha
+
+nn = 2*nintsab+2*nintscd+ncoefsalphap
+
+return
+
+1000 continue
+
+print *,"bessel_eval_init: unable to open bessel_data.bin or bessel_data16.bin"
+stop
+
+end subroutine
+
+
+subroutine read_expansion(iw,expdata)
+implicit double precision (a-h,o-z)
+type(bessel_expansion_data), intent(out) :: expdata
+
+call bessel_read_integer_binary(iw,expdata%ifbetas)
+call bessel_read_integer_binary(iw,expdata%ifover)
+call bessel_read_integer_binary(iw,expdata%ifsmall)
+call bessel_read_double_binary(iw,expdata%dnu1)
+call bessel_read_double_binary(iw,expdata%dnu2)
+call bessel_read_integer_binary(iw,expdata%nintsab)
+call bessel_read_integer_binary(iw,expdata%nintscd)
+call bessel_read_integer_binary(iw,expdata%ncoefsalpha)
+call bessel_read_integer_binary(iw,expdata%ncoefsalphap)
+call bessel_read_double_binary(iw,expdata%epsrequired)
+call bessel_read_double_binary(iw,expdata%time)
+call bessel_read_double_binary(iw,expdata%dmemory)
+
+
+allocate(expdata%ab(2,expdata%nintsab))
+allocate(expdata%cd(2,expdata%nintscd))
+allocate(expdata%coefsalpha(expdata%ncoefsalpha))
+allocate(expdata%coefsalphap(expdata%ncoefsalphap))
+allocate(expdata%iptrsalpha(expdata%nintsab,expdata%nintscd))
+allocate(expdata%iptrsalphap(expdata%nintsab,expdata%nintscd))
+
+
+
+nn = expdata%nintsab*2
+call bessel_read_double_array_binary(iw,nn,expdata%ab)
+nn = expdata%nintscd*2
+call bessel_read_double_array_binary(iw,nn,expdata%cd)
+
+call bessel_read_double_array_binary(iw,expdata%ncoefsalpha,expdata%coefsalpha)
+call bessel_read_double_array_binary(iw,expdata%ncoefsalphap,expdata%coefsalphap)
+
+nn = expdata%nintsab * expdata%nintscd
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsalpha)
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsalphap)
+
+
+if (expdata%ifbetas .eq. 1) then
+
+
+call bessel_read_integer_binary(iw,expdata%nintsef)
+call bessel_read_integer_binary(iw,expdata%ncoefsbeta1)
+call bessel_read_integer_binary(iw,expdata%ncoefsbeta2)
+
+allocate(expdata%ef(2,expdata%nintsef))
+allocate(expdata%coefsbeta1(expdata%ncoefsbeta1))
+allocate(expdata%coefsbeta2(expdata%ncoefsbeta2))
+allocate(expdata%iptrsbeta1(expdata%nintsef,expdata%nintscd))
+allocate(expdata%iptrsbeta2(expdata%nintsef,expdata%nintscd))
+
+nn = expdata%nintsef*2
+call bessel_read_double_array_binary(iw,nn,expdata%ef)
+
+call bessel_read_double_array_binary(iw,expdata%ncoefsbeta1,expdata%coefsbeta1)
+call bessel_read_double_array_binary(iw,expdata%ncoefsbeta2,expdata%coefsbeta2)
+
+nn = expdata%nintsef * expdata%nintscd
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsbeta1)
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsbeta2)
+
+endif
+
+
+end subroutine
+
+
+subroutine bessel_read_double_array_binary(iw,n,data)
+implicit double precision (a-h,o-z)
+
+double precision :: data(n)
+real*8 x
+
+do i=1,n
+read (iw) x
+data(i) = x
+end do
+end subroutine
+
+
+subroutine bessel_read_integer_array_binary(iw,n,idata)
+implicit double precision (a-h,o-z)
+
+integer :: idata(n)
+integer*8 ix
+
+do i=1,n
+read(iw) ix
+idata(i) = ix
+end do
+
+end subroutine
+
+
+
+subroutine bessel_read_integer_binary(iw,idata)
+implicit double precision (a-h,o-z)
+
+integer*8 i 
+
+read (iw) i
+idata = i
+
+end subroutine
+
+
+subroutine bessel_read_double_binary(iw,data)
+implicit double precision (a-h,o-z)
+
+real*8 x
+
+read (iw) x
+data = x
+
+end subroutine
+
+
+subroutine read_expansion16(iw,expdata)
+implicit double precision (a-h,o-z)
+type(bessel_expansion_data), intent(out) :: expdata
+
+call bessel_read_integer_binary(iw,expdata%ifbetas)
+call bessel_read_integer_binary(iw,expdata%ifover)
+call bessel_read_integer_binary(iw,expdata%ifsmall)
+call bessel_read_double_binary16(iw,expdata%dnu1)
+call bessel_read_double_binary16(iw,expdata%dnu2)
+call bessel_read_integer_binary(iw,expdata%nintsab)
+call bessel_read_integer_binary(iw,expdata%nintscd)
+call bessel_read_integer_binary(iw,expdata%ncoefsalpha)
+call bessel_read_integer_binary(iw,expdata%ncoefsalphap)
+call bessel_read_double_binary16(iw,expdata%epsrequired)
+call bessel_read_double_binary16(iw,expdata%time)
+call bessel_read_double_binary16(iw,expdata%dmemory)
+
+
+allocate(expdata%ab(2,expdata%nintsab))
+allocate(expdata%cd(2,expdata%nintscd))
+allocate(expdata%coefsalpha(expdata%ncoefsalpha))
+allocate(expdata%coefsalphap(expdata%ncoefsalphap))
+allocate(expdata%iptrsalpha(expdata%nintsab,expdata%nintscd))
+allocate(expdata%iptrsalphap(expdata%nintsab,expdata%nintscd))
+
+
+
+nn = expdata%nintsab*2
+call bessel_read_double_array_binary16(iw,nn,expdata%ab)
+nn = expdata%nintscd*2
+call bessel_read_double_array_binary16(iw,nn,expdata%cd)
+
+call bessel_read_double_array_binary16(iw,expdata%ncoefsalpha,expdata%coefsalpha)
+call bessel_read_double_array_binary16(iw,expdata%ncoefsalphap,expdata%coefsalphap)
+
+nn = expdata%nintsab * expdata%nintscd
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsalpha)
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsalphap)
+
+
+if (expdata%ifbetas .eq. 1) then
+
+
+call bessel_read_integer_binary(iw,expdata%nintsef)
+call bessel_read_integer_binary(iw,expdata%ncoefsbeta1)
+call bessel_read_integer_binary(iw,expdata%ncoefsbeta2)
+
+allocate(expdata%ef(2,expdata%nintsef))
+allocate(expdata%coefsbeta1(expdata%ncoefsbeta1))
+allocate(expdata%coefsbeta2(expdata%ncoefsbeta2))
+allocate(expdata%iptrsbeta1(expdata%nintsef,expdata%nintscd))
+allocate(expdata%iptrsbeta2(expdata%nintsef,expdata%nintscd))
+
+nn = expdata%nintsef*2
+call bessel_read_double_array_binary16(iw,nn,expdata%ef)
+
+call bessel_read_double_array_binary16(iw,expdata%ncoefsbeta1,expdata%coefsbeta1)
+call bessel_read_double_array_binary16(iw,expdata%ncoefsbeta2,expdata%coefsbeta2)
+
+nn = expdata%nintsef * expdata%nintscd
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsbeta1)
+call bessel_read_integer_array_binary(iw,nn,expdata%iptrsbeta2)
+
+endif
+
+
+end subroutine
+
+
+subroutine bessel_read_double_array_binary16(iw,n,data)
+implicit double precision (a-h,o-z)
+
+double precision :: data(n)
+real*16 x
+
+do i=1,n
+read (iw) x
+data(i) = x
+end do
+end subroutine
+
+
+subroutine bessel_read_double_binary16(iw,data)
+implicit double precision (a-h,o-z)
+
+real*16 x
+
+read (iw) x
+data = x
+
+end subroutine
+
+
+function bessel_gamma(x)
+implicit double precision (a-h,o-z)
+
+double precision :: dgamma,bessel_gamma
+
+!
+!  This routines raison d'etre is that certain versions of 
+!  gfortran's library return values with incorrect signs w
+!  when evaluating the gamma function of negative arguments.
+!
+
+dgamma = gamma(x)
+
+
+if (x .lt. 0) then
+nn1 = floor(x)
+if ((nn1/2)*2 .eq. nn1 .AND. dgamma .lt. 0) then
+dgamma = -dgamma
+endif
+endif
+
+bessel_gamma = dgamma
+end function
+
+
+end module

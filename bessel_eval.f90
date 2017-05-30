@@ -102,7 +102,10 @@ double precision                 :: dmemory,time
 end type  bessel_expansion_data
 
 
-type (bessel_expansion_data)     :: expdata1, expdata2
+type (bessel_expansion_data), private   :: expdata1, expdata2
+integer, private                        :: ifloaded
+
+data ifloaded    / 0 /
 
 ! Define a few constants which might be of use
 
@@ -244,8 +247,9 @@ endif
 !
 
 if (t .lt. dnu / 1000.0d0) then
-if (dnu .ge. 10) then
+if (dnu .gt. 100) then
 call bessel_debye(dnu,t,vallogj,vallogy,valj,valy)
+print *,"!"
 else
 call bessel_taylor(dnu,t,alpha,alphader,vallogj,vallogy,valj,valy)
 endif
@@ -1611,6 +1615,9 @@ implicit double precision (a-h,o-z)
 !     from the disk, in megabytes
 ! 
 !
+
+if (ifloaded .eq. 1) return
+ifloaded = 1
 
 eps = epsilon(0.0d0)
 

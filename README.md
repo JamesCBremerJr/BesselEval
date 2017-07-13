@@ -23,28 +23,3 @@ roughly 16 digits of precision while the latter contains a version of the
 precomputed table which achieves roughly 10^(-25) digits of accuracy (when computations 
 are perfomed using extended precision arithemtic, of course).
 
-Data used by the bessel_test.f90 to perform testing of the code is contained in the text
-files:
-
-*  bessel1.txt
-*  bessel2.txt
-*  bessel3.txt
-*  bessel4.txt
-
-Tese code is contained in the files bessel_test1.f90, bessel_test2.f90
-and bessel_test4.f90.  These test codes can be compiled with the commands:
-
-    gfortran -O3 -o bessel_test1.out  bessel_eval.f90 bessel_test1.f90
-    ./bessel_test1.out
-
-    gfortran -O3 -o bessel_test2.out amos.f bessel_eval.f90 bessel_test2.f90
-    ./bessel_test2.out
-
-    gfortran -O3 -o bessel_test3.out bessel_eval.f90 bessel_test3.f90
-    ./bessel_test3.out
-
-The second test code depends on the code of Amos for the evaluation of Bessel
-functions.  It can be obtained from the TOMS repository at 
-
-   http://netlib.org/toms/
- 

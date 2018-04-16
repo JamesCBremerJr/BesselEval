@@ -23,3 +23,6 @@ roughly 16 digits of precision while the latter contains a version of the
 precomputed table which achieves roughly 10^(-25) digits of accuracy (when computations 
 are perfomed using extended precision arithemtic, of course).
 
+To compile and test on a linux/GNU system:
+
+`make`
